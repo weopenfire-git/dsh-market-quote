@@ -65,7 +65,7 @@ globalThis.fetch = async () => ({
   status: 200,
   arrayBuffer: async () => iconv.encode(realtimeBody, 'gbk').buffer,
 })
-const [quote] = await fetchQuotes(['sh600000'])
+const [quote] = await fetchQuotes(['sh600000'], 5000)
 check('realtime code', quote.code, '600000')
 check('realtime price', quote.price, 9.1)
 check('realtime change', quote.change, -0.08)
@@ -82,7 +82,7 @@ globalThis.fetch = async (url) => {
   capturedUrl = String(url)
   return { ok: true, status: 200, json: async () => klineBody }
 }
-const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true })
+const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, 5000)
 check('kline url carries qfq+count', decodeURIComponent(capturedUrl), 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600000,day,,,30,qfq')
 check('kline bar count', bars.length, 2)
 check('kline last bar', bars[1], { date: '2026-08-14', open: 9.14, close: 9.1, high: 9.17, low: 9.06, volume: 436231 })
@@ -92,7 +92,7 @@ globalThis.fetch = async (url) => {
   capturedUrl = String(url)
   return { ok: true, status: 200, json: async () => ({ code: 0, data: { sh600000: { day: [] } } }) }
 }
-await fetchKline('sh600000', { period: 'day', count: 5000 })
+await fetchKline('sh600000', { period: 'day', count: 5000 }, 5000)
 check('kline count capped to 640', decodeURIComponent(capturedUrl).includes('sh600000,day,,,640,'), true)
 
 // 5. Date range passes start/end and sorts oldest-first.
@@ -103,7 +103,7 @@ globalThis.fetch = async (url) => {
     ['2025-06-02', '9.10', '9.15', '9.18', '9.05', '350000'],
   ] } } }) }
 }
-const ranged = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' })
+const ranged = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, 5000)
 check('range url carries start+end', decodeURIComponent(capturedUrl), 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600000,day,2025-06-01,2025-06-30,640,')
 check('range bars sorted oldest-first', ranged.map(b => b.date), ['2025-06-02', '2025-06-03'])
 
@@ -134,10 +134,32 @@ const q1 = await svc.quote('sh600000')
 const q2 = await svc.quote('sh600000')
 check('service caches quote (one fetch)', fetchCount, 1)
 check('service returns same quote', q1 === q2, true)
-check('service config defaults', resolveMarketDataConfig(), { quoteTtlMs: 5000, klineTtlMs: 300000, minRequestIntervalMs: 500 })
+check('service config defaults', resolveMarketDataConfig(), { quoteTtlMs: 5000, klineTtlMs: 300000, minRequestIntervalMs: 500, maxRetries: 3, retryBaseMs: 1000, requestTimeoutMs: 5000 })
 let threw = false
 try { resolveMarketDataConfig({ quoteTtlMs: 0 }) } catch { threw = true }
 check('service rejects non-positive config', threw, true)
+check('service allows maxRetries 0', resolveMarketDataConfig({ maxRetries: 0 }).maxRetries, 0)
+let threwNeg = false
+try { resolveMarketDataConfig({ maxRetries: -1 }) } catch { threwNeg = true }
+check('service rejects negative maxRetries', threwNeg, true)
+
+// 9. Retry: transient 5xx is retried then succeeds; 4xx (429) is never retried.
+let rAttempts = 0
+globalThis.fetch = async () => {
+  rAttempts += 1
+  if (rAttempts < 3) return { ok: false, status: 502 }
+  return { ok: true, status: 200, arrayBuffer: async () => iconv.encode(realtimeBody, 'gbk').buffer }
+}
+const rSvc = new MarketDataService(resolveMarketDataConfig({ minRequestIntervalMs: 1, retryBaseMs: 1, requestTimeoutMs: 1000 }))
+const rQuote = await rSvc.quote('sh600000')
+check('retry succeeds after transient 5xx', [rQuote.price, rAttempts], [9.1, 3])
+
+rAttempts = 0
+globalThis.fetch = async () => { rAttempts += 1; return { ok: false, status: 429 } }
+const rSvc2 = new MarketDataService(resolveMarketDataConfig({ minRequestIntervalMs: 1, retryBaseMs: 1, requestTimeoutMs: 1000 }))
+let threw429 = false
+try { await rSvc2.quote('sh600000') } catch { threw429 = true }
+check('4xx (429) is not retried', [threw429, rAttempts], [true, 1])
 
 rmSync(tmpDir, { recursive: true, force: true })
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`)

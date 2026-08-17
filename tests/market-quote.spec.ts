@@ -13,7 +13,7 @@ function fakeCtx() {
   return { ctx, registered }
 }
 
-describe('dsh-markets tool registration', () => {
+describe('dsh-market-quote tool registration', () => {
   it('registers market_quote and market_kline', () => {
     const { ctx, registered } = fakeCtx()
     apply(ctx)
@@ -43,7 +43,7 @@ describe('tencent realtime parsing', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(body).buffer,
     })))
-    const quotes = await fetchQuotes(['sh600000'])
+    const quotes = await fetchQuotes(['sh600000'], 5000)
     const q = quotes[0] as Quote
     expect(q.code).toBe('600000')
     expect(q.price).toBeCloseTo(9.1, 2)
@@ -71,7 +71,7 @@ describe('kline request', () => {
         return json
       },
     })))
-    const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true })
+    const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, 5000)
     expect(bars).toHaveLength(2)
     expect(bars[1]).toEqual({ date: '2026-08-14', open: 9.14, close: 9.1, high: 9.17, low: 9.06, volume: 436231 })
   })
@@ -84,7 +84,7 @@ describe('kline request', () => {
         return { code: 0, data: { sh600000: { day: [] } } }
       },
     })))
-    await fetchKline('sh600000', { period: 'day', count: 5000 })
+    await fetchKline('sh600000', { period: 'day', count: 5000 }, 5000)
   })
 
   it('passes a date range and sorts bars oldest-first', async () => {
@@ -99,7 +99,7 @@ describe('kline request', () => {
         ] } } }
       },
     })))
-    const bars = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' })
+    const bars = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, 5000)
     expect(bars.map(b => b.date)).toEqual(['2025-06-02', '2025-06-03'])
   })
 })
@@ -145,6 +145,40 @@ describe('MarketDataService', () => {
   })
 
   it('validates config and rejects a non-positive field', () => {
-    expect(() => resolveMarketDataConfig({ quoteTtlMs: 0 })).toThrow(/positive integer/)
+    expect(() => resolveMarketDataConfig({ quoteTtlMs: 0 })).toThrow(/integer >= 1/)
+  })
+
+  it('allows maxRetries 0 (disable) but rejects negative', () => {
+    expect(resolveMarketDataConfig({ maxRetries: 0 }).maxRetries).toBe(0)
+    expect(() => resolveMarketDataConfig({ maxRetries: -1 })).toThrow(/integer >= 0/)
+  })
+
+  it('retries a transient 5xx and then succeeds', async () => {
+    const body = 'v_sh600000="1~浦发银行~600000~9.10~9.18~9.14~436231~0~0~9.10~0~9.09~0~9.08~0~9.07~0~9.06~0~9.09~0~9.10~0~9.11~0~9.12~0~9.13~0~~20260814161455~-0.08~-0.87~9.17~9.06~9.10/436231/397586127~436231~39759~0.13~5.92~~9.17~9.06~1.20~3030.83~3030.83~0.40~10.10~8.26~0.81~10985~9.11~4.90~6.06~~~";'
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 502 })
+      .mockResolvedValueOnce({ ok: false, status: 503 })
+      .mockResolvedValue({ ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(body).buffer })
+    vi.stubGlobal('fetch', fetchMock)
+    const svc = new MarketDataService(resolveMarketDataConfig({ minRequestIntervalMs: 1, retryBaseMs: 1 }))
+    const q = await svc.quote('sh600000')
+    expect(q.price).toBe(9.1)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry a 4xx (429)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 429 })
+    vi.stubGlobal('fetch', fetchMock)
+    const svc = new MarketDataService(resolveMarketDataConfig({ minRequestIntervalMs: 1, retryBaseMs: 1 }))
+    await expect(svc.quote('sh600000')).rejects.toThrow(/429/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives up after maxRetries transient failures', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 502 })
+    vi.stubGlobal('fetch', fetchMock)
+    const svc = new MarketDataService(resolveMarketDataConfig({ minRequestIntervalMs: 1, retryBaseMs: 1, maxRetries: 2 }))
+    await expect(svc.quote('sh600000')).rejects.toThrow(/502/)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 })

@@ -8,8 +8,9 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 
 - **Two tools, three markets, one source**: realtime quotes + historical K-line; one bare-symbol entry across A-share / HK / US (`600000` / `00700` / `AAPL`), prefixes/suffixes resolved automatically.
 - **No credentials, no config**: Tencent's public quote API — no API key, no Referer; Node ≥22.19 built-in `fetch` + GBK `TextDecoder`, no third-party runtime deps.
-- **Built-in rate limiting (anti-ban)**: global ≤2 QPS spacing (≥500ms) + same-key single-flight + 5s quote / 5min K-line caches flatten bursts into low-rate serial requests, avoiding upstream bans / IP blocks from asking for too much at once; all three tunable.
-- **Read-only, concurrency-safe, 15s timeout**: tools are side-effect-free and safe to call concurrently.
+- **Built-in rate limiting (anti-ban)**: global ≤2 QPS spacing (≥500ms) + same-key single-flight + 5s quote / 5min K-line caches flatten bursts into low-rate serial requests, avoiding upstream bans / IP blocks from asking for too much at once; all tunable.
+- **Safe retry**: exponential backoff with jitter (1s→2s→4s, ≤3 tries) only for transient errors (5xx / network / timeout); 4xx (incl. the 429 "stop" signal) is never retried; retries still queue through the global limiter, never amplifying QPS.
+- **Read-only, concurrency-safe, 30s timeout**: tools are side-effect-free and safe to call concurrently.
 
 ## Design
 
@@ -17,6 +18,7 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 - **K-line pagination cursor**: Tencent caps one request at 640 bars. `day` paginates forward with a "last date +1" cursor and dedupes; `week` / `month` (640 bars ≈ 12 / 53 years) fit one request; total return hard-capped at 2000 bars.
 - **US history auto-resolves exchange suffix**: Tencent's US history needs a suffixed code like `usAAPL.OQ`; the plugin first resolves the authoritative code from the realtime quote, then feeds it to the K-line API — users only pass the bare `AAPL`.
 - **Rate limiting (anti-ban), three layers**: an in-process TTL cache (5s quotes / 5min K-line) dedupes repeats; concurrent callers for one key share a single in-flight request; a global limiter enforces ≥500ms between any two requests (≤2 QPS) and queues concurrent calls onto future slots — preventing the "too many requests at once" pattern that triggers upstream bans. Combined with the 640-bars-per-request / 2000-total caps, a single K-line query also has a hard request-count bound. The clock and sleeper are injectable so tests can drive time deterministically.
+- **Safe retry strategy**: every attempt carries an `AbortController` timeout (hung requests fail fast); only transient errors (HTTP 5xx, network failure, timeout) are retried — 4xx (incl. the 429 "stop" signal) is never retried; exponential backoff + full jitter (1s→2s→4s), max 3 retries; each retry first queues through the global limiter, never cutting the line or amplifying QPS.
 - **No custom UI**: no `presentCall` / `presentResult`; relies on DSH's generic tool card, keeping front-end coupling low.
 
 ## Tools
@@ -52,15 +54,18 @@ Start a new session with that preset to expose the two tools.
 
 ## Configuration
 
-Three tunables (positive integer milliseconds), overridable via plugin `config`:
+Six tunables (`maxRetries` is a non-negative count; the rest are positive-integer milliseconds), overridable via plugin `config`:
 
 | Key | Default | Meaning |
 |---|---|---|
 | `quoteTtlMs` | 5000 | realtime quote cache TTL |
 | `klineTtlMs` | 300000 | K-line cache TTL (5 min) |
 | `minRequestIntervalMs` | 500 | minimum request spacing (≤2 QPS) |
+| `maxRetries` | 3 | max retries per request (0 disables) |
+| `retryBaseMs` | 1000 | backoff base (1s → 2s → 4s, full jitter) |
+| `requestTimeoutMs` | 5000 | per-attempt fetch timeout |
 
-Non-positive values throw at plugin activation.
+Invalid values (negative `maxRetries`, non-positive others) throw at plugin activation.
 
 ## Data source
 
@@ -77,7 +82,7 @@ pnpm run typecheck && pnpm run test && pnpm run build   # test OK then push
 npm pack --dry-run    # inspect package contents before publishing
 ```
 
-Also available: `node validate.mjs` (22 assertions, vitest-free) and `node --import tsx/esm smoke.mjs` (real tool-registry smoke).
+Also available: `node validate.mjs` (26 assertions, vitest-free) and `node --import tsx/esm smoke.mjs` (real tool-registry smoke).
 
 ## Layout
 
@@ -102,7 +107,7 @@ dsh-market-quote/
 - In-process memory cache: lost on restart, not shared across instances/processes.
 - No adjusted-price selection (A-share defaults to unadjusted; HK/US have none).
 - Data source is Tencent's public interface (not officially licensed) — assess compliance/distribution yourself; prefer a paid feed for production.
-- Rate limiting is fixed-interval (proactive); there is no adaptive backoff or retry — transient upstream failures throw immediately.
+- Retries cover transient errors only (5xx / network / timeout); a 429 fails immediately (respecting the upstream "stop" signal) — `Retry-After` is not parsed for adaptive backoff.
 
 ## Publishing
 

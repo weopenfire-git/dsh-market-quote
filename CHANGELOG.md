@@ -4,6 +4,20 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-08-17
+
+### Added
+
+- 安全重试策略：仅对临时错误（HTTP 5xx / 网络失败 / 超时）做指数退避 + 全抖动（1s→2s→4s）重试，最多 3 次；4xx（含 429）绝不重试；每次重试同样经全局限速器排队，不放大 QPS。
+- 单次尝试 `AbortController` 超时（`requestTimeoutMs`，默认 5s），挂死请求快速失败并进入重试。
+- 新增 `maxRetries` / `retryBaseMs` / `requestTimeoutMs` 三个配置项。
+- 新增 `HttpError` 与 `isTransientError` 错误分类，供重试层判断可重试性。
+- 单元测试与 `validate.mjs` 覆盖重试行为（5xx 重试成功 / 429 不重试 / 次数上限）。
+
+### Changed
+
+- 工具 `timeoutMs` 由 15000 调整为 30000（容纳最多 4 次尝试 + 退避）。
+
 ## [0.1.0] - 2026-08-17
 
 首个可发布版本。

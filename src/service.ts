@@ -9,10 +9,10 @@
  */
 
 import type { Bar, FetchKlineOptions, Quote } from './tencent.ts'
-import { fetchKline, fetchQuote } from './tencent.ts'
-import { RateLimiter, TtlCache } from './cache.ts'
+import { fetchKline, fetchQuote, isTransientError } from './tencent.ts'
+import { RateLimiter, sleep, TtlCache } from './cache.ts'
 
-/** Tunables for {@link MarketDataService}, all positive integers in milliseconds. */
+/** Tunables for {@link MarketDataService}; cache/interval/backoff fields are ms, `maxRetries` is a count. */
 export interface MarketDataConfig {
   /** Realtime quote cache TTL. */
   quoteTtlMs?: number
@@ -20,6 +20,12 @@ export interface MarketDataConfig {
   klineTtlMs?: number
   /** Minimum spacing between consecutive API requests. */
   minRequestIntervalMs?: number
+  /** Max retries per request on a transient (5xx / network) failure; 0 disables retries. */
+  maxRetries?: number
+  /** Base of the exponential backoff between retries (1s → 2s → 4s, full jitter). */
+  retryBaseMs?: number
+  /** Hard per-attempt fetch timeout (AbortController). */
+  requestTimeoutMs?: number
 }
 
 /** Default quote cache lifetime (5 s): quotes move, but not every keystroke. */
@@ -28,6 +34,12 @@ export const DEFAULT_QUOTE_TTL_MS = 5_000
 export const DEFAULT_KLINE_TTL_MS = 300_000
 /** Default request spacing (500 ms = 2 QPS), within Tencent's de-facto polite range. */
 export const DEFAULT_MIN_REQUEST_INTERVAL_MS = 500
+/** Default max retries per request; transient failures only, 4xx (incl. 429) is never retried. */
+export const DEFAULT_MAX_RETRIES = 3
+/** Default backoff base (1 s): retries wait ~1s → 2s → 4s with full jitter. */
+export const DEFAULT_RETRY_BASE_MS = 1_000
+/** Default per-attempt fetch timeout (5 s). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 5_000
 
 /** Validate and default the raw config; fails loud on a non-positive-integer field. */
 export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Required<MarketDataConfig> {
@@ -35,10 +47,14 @@ export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Req
     quoteTtlMs: config?.quoteTtlMs ?? DEFAULT_QUOTE_TTL_MS,
     klineTtlMs: config?.klineTtlMs ?? DEFAULT_KLINE_TTL_MS,
     minRequestIntervalMs: config?.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    maxRetries: config?.maxRetries ?? DEFAULT_MAX_RETRIES,
+    retryBaseMs: config?.retryBaseMs ?? DEFAULT_RETRY_BASE_MS,
+    requestTimeoutMs: config?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
   }
   for (const [key, value] of Object.entries(resolved)) {
-    if (!Number.isInteger(value) || value <= 0) {
-      throw new Error(`dsh-markets: ${key} must be a positive integer`)
+    const min = key === 'maxRetries' ? 0 : 1
+    if (!Number.isInteger(value) || (value as number) < min) {
+      throw new Error(`dsh-market-quote: ${key} must be an integer >= ${min}`)
     }
   }
   return resolved
@@ -47,6 +63,11 @@ export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Req
 /** Stable cache key for one K-line request. */
 function klineKey(rawCode: string, options: FetchKlineOptions): string {
   return [rawCode, options.period, options.start ?? '', options.end ?? '', String(options.count ?? ''), String(options.adjusted ?? false)].join('|')
+}
+
+/** Full-jitter exponential backoff: uniform in [0, baseMs * 2^attempt]. */
+function backoffMs(attempt: number, baseMs: number): number {
+  return Math.floor(Math.random() * baseMs * 2 ** attempt)
 }
 
 /** Cached, rate-limited access to realtime quotes and historical K-line. */
@@ -87,16 +108,36 @@ export class MarketDataService {
   }
 
   private async loadQuote(rawCode: string): Promise<Quote> {
-    await this.limiter.acquire()
-    const quote = await fetchQuote(rawCode)
-    this.quoteCache.set(rawCode, quote)
-    return quote
+    return this.withRetry(async () => {
+      const quote = await fetchQuote(rawCode, this.config.requestTimeoutMs)
+      this.quoteCache.set(rawCode, quote)
+      return quote
+    })
   }
 
   private async loadKline(rawCode: string, options: FetchKlineOptions, key: string): Promise<Bar[]> {
-    await this.limiter.acquire()
-    const bars = await fetchKline(rawCode, options)
-    this.klineCache.set(key, bars)
-    return bars
+    return this.withRetry(async () => {
+      const bars = await fetchKline(rawCode, options, this.config.requestTimeoutMs)
+      this.klineCache.set(key, bars)
+      return bars
+    })
+  }
+
+  /**
+   * Run one API operation with bounded retry on transient failures. Every
+   * attempt (including retries) claims a slot from the shared limiter, so a
+   * retry never cuts the line; backoff is full-jitter exponential and 4xx is
+   * never retried.
+   */
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      await this.limiter.acquire()
+      try {
+        return await operation()
+      } catch (error) {
+        if (attempt >= this.config.maxRetries || !isTransientError(error)) throw error
+        await sleep(backoffMs(attempt, this.config.retryBaseMs))
+      }
+    }
   }
 }

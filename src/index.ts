@@ -23,7 +23,7 @@ export const name = 'dsh-market-quote'
 /** Services required by the plugin's tools. */
 export const inject = ['tools']
 
-/** Plugin config: cache lifetimes and request spacing (all positive integers in ms). */
+/** Plugin config: cache lifetimes, request spacing, and retry (all in MarketDataConfig). */
 export interface Config extends MarketDataConfig {}
 
 /**
@@ -75,7 +75,7 @@ export function apply(ctx: Context, config?: Config): void {
         }]
       },
     },
-    timeoutMs: 15_000,
+    timeoutMs: 30_000,
     isConcurrencySafe: () => true,
     async execute(args) {
       const rawCode = qqCode(args.symbol, args.market)
@@ -165,7 +165,7 @@ export function apply(ctx: Context, config?: Config): void {
           + `(${value.bars[0]?.date}..${value.bars.at(-1)?.date})\n${head}` }]
       },
     },
-    timeoutMs: 15_000,
+    timeoutMs: 30_000,
     isConcurrencySafe: () => true,
     async execute(args) {
       const market: Market = args.market
