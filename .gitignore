@@ -1,0 +1,6 @@
+node_modules/
+lib/
+lib-tmp/
+*.tsbuildinfo
+.dsh/
+*.tgz

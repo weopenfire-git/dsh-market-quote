@@ -1,0 +1,115 @@
+# dsh-market-quote
+
+DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_kline` 两个只读工具，用**一个数据源**覆盖 **A股 / 港股 / 美股** 的实时行情与历史日 / 周 / 月 K 线。
+
+> 简体中文 · [English](./README.en.md)
+
+## 核心亮点
+
+- **两工具、三市场、单一源**：实时报价 + 历史 K 线；A股 / 港股 / 美股统一裸代码入口（`600000` / `00700` / `AAPL`），前缀后缀自动补齐。
+- **零凭证、零配置**：腾讯公开行情接口，免 API key、免 Referer；Node ≥22.19 内置 `fetch` 与 GBK `TextDecoder`，无第三方运行时依赖。
+- **内置缓存与限流**：报价 5s / K 线 5min TTL、同 key 单飞、请求间隔 ≥500ms（≤2 QPS），防封 IP，三项均可配置。
+- **只读、并发安全、15s 超时**：工具无副作用，可安全并发调用。
+
+## 技术设计
+
+- **单一数据源 + 字节级解码**：实时接口 `qt.gtimg.cn` 返回 GBK 编码、`~` 分隔的字段串，按字节解码（`TextDecoder('gbk')`）而非按 UTF-8 字符串；只读稳定核心字段（[0..53]），容忍上游字段变体与未知尾部，解析不因尾字段变化而崩。
+- **K 线分页游标**：腾讯单请求上限 640 根。`day` 周期用「上一页最后一根日期 +1」作游标前向翻页并去重；`week` / `month` 640 根 ≈ 12 / 53 年，单请求覆盖；总返回量硬上限 2000 根。
+- **美股历史自动补交易所后缀**：腾讯美股历史要求 `usAAPL.OQ` 之类带后缀的代码，插件先从实时报价解析出权威代码再喂给 K 线接口，用户只传裸代码 `AAPL`。
+- **缓存 → 单飞 → 限流三层**：进程内 TTL 缓存去重；同 key 并发合并为一次在途请求（single-flight）；全局最小间隔门控把突发摊平。时钟与睡眠可注入，单测可确定性驱动时间。
+- **无 UI 定制**：不写 `presentCall` / `presentResult`，复用 DSH 通用工具卡片，减少前端耦合。
+
+## 工具
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `market_quote` | `symbol`、`market`（cn/hk/us） | 最新价、昨收、今开、最高、最低、涨跌额、涨跌幅、成交量、报价时间、是否延迟 |
+| `market_kline` | `symbol`、`market`、`period`（day/week/month）、`start`/`end`、`count` | 历史日 / 周 / 月 K 线（开/收/高/低/量，最旧在前）；不带区间返回最近 N 根，`start=end` 查单日 |
+
+- `market`：`cn` = A股、`hk` = 港股、`us` = 美股。
+- `symbol` 用裸代码：A股 `600000` / `000001`、港股 `00700`、美股 `AAPL`。
+- `day` 超 640 根自动分页；总返回上限 2000 根。
+
+## 安装
+
+### `dsh plugin add`（推荐）
+
+```sh
+dsh plugin add dsh-market-quote                        # npm
+dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
+```
+
+### 预设挂载（本地 / 源码开发）
+
+复制一份 `standard` 预设，在 `agent.cordis.yml` 末尾加一行（源码经 tsx 直接加载；或先 `pnpm run build` 后指向 `lib/index.js`）：
+
+```yaml
+- id: dsh-market-quote
+  name: 'file:///D:/path/to/dsh-market-quote/src/index.ts'
+```
+
+新建会话选该预设，即可看到两个工具。
+
+## 配置
+
+三个 tunable（均为正整数毫秒），经插件 `config` 覆盖：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `quoteTtlMs` | 5000 | 实时报价缓存 TTL |
+| `klineTtlMs` | 300000 | K 线缓存 TTL（5 分钟） |
+| `minRequestIntervalMs` | 500 | 请求最小间隔（≤2 QPS） |
+
+非正整数在插件激活时抛错。
+
+## 数据源
+
+- 实时：`GET https://qt.gtimg.cn/q=sh600000,hk00700,usAAPL`（GBK，`~` 分隔）。
+- 历史：`GET https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=<code>,day,,,<count>,qfq`（JSON）。
+
+边界：A股单请求 640 行；美股历史须带交易所后缀（插件自动处理）；港股 / 美股无复权；美股延迟行情。数据源为腾讯公开接口，非官方授权，生产环境建议评估付费行情源（见[已知限制](#已知限制)）。
+
+## 开发与测试
+
+```sh
+pnpm install
+pnpm run typecheck && pnpm run test && pnpm run build   # test OK then push
+npm pack --dry-run    # 发布前检查包内容
+```
+
+另有免 vitest 的运行时校验 `node validate.mjs`（22 项断言）与真实加载冒烟 `node --import tsx/esm smoke.mjs`。
+
+## 目录
+
+```
+dsh-market-quote/
+├── src/                 # index.ts / tencent.ts / cache.ts / service.ts
+├── tests/               # vitest 用例
+├── preset/              # 示例 preset 片段
+├── validate.mjs         # 免 vitest 运行时校验
+├── smoke.mjs            # 真实工具注册表冒烟
+├── tsdown.config.ts
+├── tsconfig.json
+├── vitest.config.ts
+├── package.json
+├── CHANGELOG.md
+├── LICENSE
+└── README.md / README.en.md
+```
+
+## 已知限制
+
+- 缓存为进程内内存，重启即失效，多实例 / 多进程不共享。
+- 未做复权选择（A股默认不复权；港股 / 美股无复权）。
+- 数据源为腾讯公开接口（非官方授权），合规 / 分发自行评估；生产建议付费行情源。
+
+## 发布
+
+1. GitHub 仓库加 `dsh-plugin` topic（可选 `deepseek-harness`），被[官方 topic 页](https://github.com/topics/dsh-plugin)收录。
+2. npm + GitHub 双发布，版本一致（tag `vX.Y.Z` ↔ npm `X.Y.Z`）。
+3. `pnpm publish`（`prepare` 自动 build；需 2FA）。scoped 包需先建 npm org。
+4. 稳定后向 [awesome-deepseek-harness](https://github.com/0xsline/awesome-deepseek-harness) 提 PR。
+
+## License
+
+[MIT](./LICENSE)

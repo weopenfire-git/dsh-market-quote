@@ -1,0 +1,14 @@
+# 追加到「standard 预设副本」的示例片段。
+#
+# 不要把这个文件当作完整预设——它只有一行：挂载 dsh-markets 插件。
+# 完整接入方式见 prototypes/market-quote/README.md「如何接入正在运行的 Web GUI」。
+#
+# 用法：复制 standard 预设目录，在复制出的 agent.cordis.yml 末尾追加下面这一行。
+#   name 指向本插件的入口：
+#   - 源码运行（dsh 经 tsx）用 .ts 源文件；
+#   - 构建后运行用 lib/index.js（先 `tsc -p tsconfig.json` 产出）。
+#
+# 说明：绝对路径会被 preset mount 转成 file: URL 导入（见
+# packages/preset/agent-presets/src/mount.ts）；裸包名依赖从宿主 harness 解析。
+- id: dsh-market-quote
+  name: 'D:/work/ClaudeCode/DSHarness/prototypes/market-quote/src/index.ts'
