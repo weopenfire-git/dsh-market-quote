@@ -8,7 +8,7 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 
 - **Two tools, three markets, one source**: realtime quotes + historical K-line; one bare-symbol entry across A-share / HK / US (`600000` / `00700` / `AAPL`), prefixes/suffixes resolved automatically.
 - **No credentials, no config**: Tencent's public quote API — no API key, no Referer; Node ≥22.19 built-in `fetch` + GBK `TextDecoder`, no third-party runtime deps.
-- **Built-in cache + rate limit**: 5s quote / 5min K-line TTL, same-key single-flight, ≥500ms request spacing (≤2 QPS) to avoid IP bans; all three tunable.
+- **Built-in rate limiting (anti-ban)**: global ≤2 QPS spacing (≥500ms) + same-key single-flight + 5s quote / 5min K-line caches flatten bursts into low-rate serial requests, avoiding upstream bans / IP blocks from asking for too much at once; all three tunable.
 - **Read-only, concurrency-safe, 15s timeout**: tools are side-effect-free and safe to call concurrently.
 
 ## Design
@@ -16,7 +16,7 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 - **Single source, byte-level decode**: the realtime endpoint `qt.gtimg.cn` returns GBK-encoded, `~`-delimited field strings; decoded as bytes (`TextDecoder('gbk')`) rather than a UTF-8 string. Only the stable core fields ([0..53]) are read, staying tolerant of upstream field variants and unknown tails.
 - **K-line pagination cursor**: Tencent caps one request at 640 bars. `day` paginates forward with a "last date +1" cursor and dedupes; `week` / `month` (640 bars ≈ 12 / 53 years) fit one request; total return hard-capped at 2000 bars.
 - **US history auto-resolves exchange suffix**: Tencent's US history needs a suffixed code like `usAAPL.OQ`; the plugin first resolves the authoritative code from the realtime quote, then feeds it to the K-line API — users only pass the bare `AAPL`.
-- **Cache → single-flight → rate-limit layers**: an in-process TTL cache dedupes repeats; concurrent callers for one key share a single in-flight request; a global minimum-interval gate spreads bursts. The clock and sleeper are injectable so tests can drive time deterministically.
+- **Rate limiting (anti-ban), three layers**: an in-process TTL cache (5s quotes / 5min K-line) dedupes repeats; concurrent callers for one key share a single in-flight request; a global limiter enforces ≥500ms between any two requests (≤2 QPS) and queues concurrent calls onto future slots — preventing the "too many requests at once" pattern that triggers upstream bans. Combined with the 640-bars-per-request / 2000-total caps, a single K-line query also has a hard request-count bound. The clock and sleeper are injectable so tests can drive time deterministically.
 - **No custom UI**: no `presentCall` / `presentResult`; relies on DSH's generic tool card, keeping front-end coupling low.
 
 ## Tools
@@ -102,6 +102,7 @@ dsh-market-quote/
 - In-process memory cache: lost on restart, not shared across instances/processes.
 - No adjusted-price selection (A-share defaults to unadjusted; HK/US have none).
 - Data source is Tencent's public interface (not officially licensed) — assess compliance/distribution yourself; prefer a paid feed for production.
+- Rate limiting is fixed-interval (proactive); there is no adaptive backoff or retry — transient upstream failures throw immediately.
 
 ## Publishing
 
