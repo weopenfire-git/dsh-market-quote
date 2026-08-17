@@ -4,11 +4,14 @@ import { apply } from '../src/index.ts'
 import { RateLimiter, TtlCache } from '../src/cache.ts'
 import { MarketDataService, resolveMarketDataConfig } from '../src/service.ts'
 
-/** A minimal fake of the Cordis ctx surface `apply` needs: just a tools registry. */
+const noopAcquire = async () => {}
+
+/** A minimal fake of the Cordis ctx surface `apply` needs: a tools and systemPrompt registry. */
 function fakeCtx() {
   const registered: Array<{ name: string }> = []
   const ctx = {
     tools: { register: (def: { name: string }) => { registered.push(def); return () => {} } },
+    systemPrompt: { context: () => () => {} },
   } as unknown as Parameters<typeof apply>[0]
   return { ctx, registered }
 }
@@ -43,7 +46,7 @@ describe('tencent realtime parsing', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(body).buffer,
     })))
-    const quotes = await fetchQuotes(['sh600000'], 5000)
+    const quotes = await fetchQuotes(['sh600000'], 5000, noopAcquire)
     const q = quotes[0] as Quote
     expect(q.code).toBe('600000')
     expect(q.price).toBeCloseTo(9.1, 2)
@@ -71,7 +74,7 @@ describe('kline request', () => {
         return json
       },
     })))
-    const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, 5000)
+    const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, 5000, noopAcquire)
     expect(bars).toHaveLength(2)
     expect(bars[1]).toEqual({ date: '2026-08-14', open: 9.14, close: 9.1, high: 9.17, low: 9.06, volume: 436231 })
   })
@@ -84,7 +87,7 @@ describe('kline request', () => {
         return { code: 0, data: { sh600000: { day: [] } } }
       },
     })))
-    await fetchKline('sh600000', { period: 'day', count: 5000 }, 5000)
+    await fetchKline('sh600000', { period: 'day', count: 5000 }, 5000, noopAcquire)
   })
 
   it('passes a date range and sorts bars oldest-first', async () => {
@@ -99,8 +102,26 @@ describe('kline request', () => {
         ] } } }
       },
     })))
-    const bars = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, 5000)
+    const bars = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, 5000, noopAcquire)
     expect(bars.map(b => b.date)).toEqual(['2025-06-02', '2025-06-03'])
+  })
+
+  it('acquires the rate-limit gate once per paginated request', async () => {
+    const genBars = (n: number): string[][] => Array.from({ length: n }, (_, i) => {
+      const date = new Date(Date.UTC(2023, 0, 1) + i * 86_400_000).toISOString().slice(0, 10)
+      return [date, '9.00', '9.10', '9.20', '8.90', '1000']
+    })
+    const pages = [genBars(640), genBars(10)]
+    const fetchMock = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ code: 0, data: { sh600000: { day: pages.shift() } } }),
+    }))
+    const acquire = vi.fn(async () => {})
+    vi.stubGlobal('fetch', fetchMock)
+    const bars = await fetchKline('sh600000', { period: 'day', start: '2023-01-01', end: '2025-12-31', count: 2000 }, 5000, acquire)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(acquire).toHaveBeenCalledTimes(2)
+    expect(bars).toHaveLength(640)
   })
 })
 

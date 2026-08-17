@@ -14,14 +14,15 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { PromptContext } from '@deepseek-ai/dsh-system-prompt'
 import { qqCode, type FetchKlineOptions, type Market } from './tencent.ts'
 import { MarketDataService, resolveMarketDataConfig, type MarketDataConfig } from './service.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-market-quote'
 
-/** Services required by the plugin's tools. */
-export const inject = ['tools']
+/** Services required by the plugin's tools and usage guidance. */
+export const inject = ['tools', 'systemPrompt']
 
 /** Plugin config: cache lifetimes, request spacing, and retry (all in MarketDataConfig). */
 export interface Config extends MarketDataConfig {}
@@ -33,6 +34,16 @@ export interface Config extends MarketDataConfig {}
  */
 export function apply(ctx: Context, config?: Config): void {
   const service = new MarketDataService(resolveMarketDataConfig(config))
+  const usage: PromptContext = {
+    name: 'dsh-market-quote:usage',
+    order: 100,
+    text: '【行情查询建议】dsh-market-quote 走腾讯公开接口：每个 HTTP 请求间隔 ≥500ms（≤2 QPS），'
+      + '日线超过 640 根会分页（每页 640 根，单次最多 2000 根 ≈ 4 页），分页越多等待越长、请求越多、越易触发限流。'
+      + '建议：查最新价用 market_quote（单请求）；短期走势用 market_kline 的 period=day 且 count ≤640（单请求）；'
+      + '跨年长期走势优先用 period=week（单请求约 12 年）或 period=month（约 53 年），'
+      + '避免超大 day 区间分页，以减少等待、降低被封风险。',
+  }
+  ctx.systemPrompt.context(usage)
   ctx.tools.register(defineTool({
     name: 'market_quote',
     description:
@@ -104,7 +115,9 @@ export function apply(ctx: Context, config?: Config): void {
       + 'A-share (cn), Hong Kong (hk), or US (us) markets. '
       + "Use a bare symbol without prefix: for example '600000' (A-share), '00700' (Hong Kong), 'AAPL' (US). "
       + 'Without start/end it returns the most-recent bars; with start (and optionally end, YYYY-MM-DD) '
-      + 'it returns bars in that date range, oldest first. Set start=end to query one specific day.',
+      + 'it returns bars in that date range, oldest first. Set start=end to query one specific day. '
+      + 'Daily ranges over 640 bars paginate (each request is spaced ≥500ms), so very large day ranges are slow; '
+      + 'prefer period=week/month for multi-year spans, or keep count ≤640.',
     parameters: {
       symbol: { type: 'string', required: true, description: 'Bare stock symbol, e.g. 600000 / 00700 / AAPL' },
       market: {
@@ -115,7 +128,7 @@ export function apply(ctx: Context, config?: Config): void {
       period: {
         type: 'string',
         enum: ['day', 'week', 'month'],
-        description: 'Bar interval; defaults to day',
+        description: 'Bar interval; defaults to day. Prefer week or month for multi-year spans (~12/~53 years in one request)',
       },
       start: {
         type: 'string',
@@ -127,7 +140,7 @@ export function apply(ctx: Context, config?: Config): void {
       },
       count: {
         type: 'integer',
-        description: 'Max bars to return; defaults to 30 (recent) or 640 (range), hard cap 2000',
+        description: 'Max bars to return; defaults to 30 (recent) or 640 (range), hard cap 2000. Keep ≤640 to avoid pagination',
       },
     },
     output: {
@@ -137,6 +150,7 @@ export function apply(ctx: Context, config?: Config): void {
           symbol: { type: 'string', required: true },
           market: { type: 'string', required: true },
           period: { type: 'string', required: true },
+          elapsedMs: { type: 'number', required: true },
           bars: {
             type: 'array',
             required: true,
@@ -160,9 +174,13 @@ export function apply(ctx: Context, config?: Config): void {
         }
         const head = value.bars.slice(-3).map(b =>
           `${b.date} ${b.close} ${b.high}/${b.low} vol=${b.volume}`).join('\n')
+        const pages = Math.ceil(value.bars.length / 640)
+        const note = pages > 1
+          ? `\n(paginated ${pages} requests, took ${value.elapsedMs}ms; prefer week/month or a smaller range to reduce waiting)`
+          : ''
         return [{ type: 'text', text:
           `${value.symbol} (${value.market.toUpperCase()}) ${value.period}: ${value.bars.length} bars `
-          + `(${value.bars[0]?.date}..${value.bars.at(-1)?.date})\n${head}` }]
+          + `(${value.bars[0]?.date}..${value.bars.at(-1)?.date})\n${head}${note}` }]
       },
     },
     timeoutMs: 30_000,
@@ -180,11 +198,13 @@ export function apply(ctx: Context, config?: Config): void {
       if (args.start !== undefined) options.start = args.start
       if (args.end !== undefined) options.end = args.end
       if (args.count !== undefined) options.count = args.count
+      const startedAt = Date.now()
       const bars = await service.kline(rawCode, options)
       return {
         symbol: args.symbol,
         market,
         period,
+        elapsedMs: Date.now() - startedAt,
         bars: bars.map(b => ({ ...b })),
       }
     },

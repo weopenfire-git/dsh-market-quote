@@ -1,6 +1,6 @@
 {
   "name": "dsh-market-quote",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH tool plugin: realtime quotes and historical K-line for A-share / HK / US markets via Tencent's public quote API.",
   "type": "module",
   "license": "MIT",
@@ -43,6 +43,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5 <0.2.0"
   },
   "devDependencies": {

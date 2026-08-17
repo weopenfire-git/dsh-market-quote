@@ -109,7 +109,7 @@ export class MarketDataService {
 
   private async loadQuote(rawCode: string): Promise<Quote> {
     return this.withRetry(async () => {
-      const quote = await fetchQuote(rawCode, this.config.requestTimeoutMs)
+      const quote = await fetchQuote(rawCode, this.config.requestTimeoutMs, () => this.limiter.acquire())
       this.quoteCache.set(rawCode, quote)
       return quote
     })
@@ -117,7 +117,7 @@ export class MarketDataService {
 
   private async loadKline(rawCode: string, options: FetchKlineOptions, key: string): Promise<Bar[]> {
     return this.withRetry(async () => {
-      const bars = await fetchKline(rawCode, options, this.config.requestTimeoutMs)
+      const bars = await fetchKline(rawCode, options, this.config.requestTimeoutMs, () => this.limiter.acquire())
       this.klineCache.set(key, bars)
       return bars
     })
@@ -125,13 +125,12 @@ export class MarketDataService {
 
   /**
    * Run one API operation with bounded retry on transient failures. Every
-   * attempt (including retries) claims a slot from the shared limiter, so a
-   * retry never cuts the line; backoff is full-jitter exponential and 4xx is
-   * never retried.
+   * underlying HTTP request claims a slot from the shared limiter inside the
+   * data layer (so pagination pages and retries never cut the line); backoff is
+   * full-jitter exponential and 4xx is never retried.
    */
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
-      await this.limiter.acquire()
       try {
         return await operation()
       } catch (error) {

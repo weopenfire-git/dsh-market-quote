@@ -87,8 +87,12 @@ export function qqCode(code: string, market: Market): string {
   }
 }
 
-/** Fetch with a hard per-attempt timeout; aborts (AbortError) after `timeoutMs`. */
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+/** A slot-claiming gate every HTTP request passes through before fetching. */
+export type Acquire = () => Promise<void>
+
+/** Claim the request gate, then fetch with a hard per-attempt timeout; aborts (AbortError) after `timeoutMs`. */
+async function fetchWithTimeout(url: string, timeoutMs: number, acquire: Acquire): Promise<Response> {
+  await acquire()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -99,8 +103,8 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
 }
 
 /** Latest quote for one symbol. */
-export async function fetchQuote(rawCode: string, requestTimeoutMs: number): Promise<Quote> {
-  const quotes = await fetchQuotes([rawCode], requestTimeoutMs)
+export async function fetchQuote(rawCode: string, requestTimeoutMs: number, acquire: Acquire): Promise<Quote> {
+  const quotes = await fetchQuotes([rawCode], requestTimeoutMs, acquire)
   const quote = quotes[0]
   if (quote === undefined) throw new Error(`tencent: no quote returned for ${rawCode}`)
   return quote
@@ -110,13 +114,14 @@ export async function fetchQuote(rawCode: string, requestTimeoutMs: number): Pro
  * Fetch realtime quotes for several symbols in one request.
  * @param rawCodes - Tencent codes (`sh600000`, `hk00700`, `usAAPL.OQ`, ...).
  * @param requestTimeoutMs - hard per-attempt fetch timeout in ms.
+ * @param acquire - request gate to await before fetching.
  * @returns one entry per requested symbol, in request order. A symbol Tencent
  *   does not know is excluded rather than throwing, so a batch survives a bad member.
  */
-export async function fetchQuotes(rawCodes: readonly string[], requestTimeoutMs: number): Promise<Quote[]> {
+export async function fetchQuotes(rawCodes: readonly string[], requestTimeoutMs: number, acquire: Acquire): Promise<Quote[]> {
   if (rawCodes.length === 0) return []
   const url = 'https://qt.gtimg.cn/q=' + rawCodes.join(',')
-  const response = await fetchWithTimeout(url, requestTimeoutMs)
+  const response = await fetchWithTimeout(url, requestTimeoutMs, acquire)
   if (!response.ok) {
     throw new HttpError(response.status, `tencent: quote request failed with HTTP ${response.status}`)
   }
@@ -196,12 +201,13 @@ async function klineOnce(
   count: number,
   adjusted: boolean,
   requestTimeoutMs: number,
+  acquire: Acquire,
 ): Promise<Bar[]> {
   const fq = adjusted ? 'qfq' : ''
   // param = <code>,<period>,<start>,<end>,<count>,<fq>
   const param = [rawCode, period, start, end, String(count), fq].join(',')
   const url = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + encodeURIComponent(param)
-  const response = await fetchWithTimeout(url, requestTimeoutMs)
+  const response = await fetchWithTimeout(url, requestTimeoutMs, acquire)
   if (!response.ok) {
     throw new HttpError(response.status, `tencent: kline request failed with HTTP ${response.status}`)
   }
@@ -261,16 +267,17 @@ export interface FetchKlineOptions {
  *   suffix (e.g. `usAAPL.OQ`); use {@link fetchQuote} to resolve it first.
  * @param options - see {@link FetchKlineOptions}.
  * @param requestTimeoutMs - hard per-attempt fetch timeout in ms.
+ * @param acquire - request gate to await before each paginated fetch.
  * @returns bars oldest-first.
  */
-export async function fetchKline(rawCode: string, options: FetchKlineOptions, requestTimeoutMs: number): Promise<Bar[]> {
+export async function fetchKline(rawCode: string, options: FetchKlineOptions, requestTimeoutMs: number, acquire: Acquire): Promise<Bar[]> {
   const { period } = options
   const adjusted = options.adjusted ?? false
 
   // Recent path: no range, single request.
   if (options.start === undefined && options.end === undefined) {
     const n = Math.max(1, Math.min(KLINE_PAGE_MAX, Math.floor(options.count ?? 30)))
-    return klineOnce(rawCode, period, '', '', n, adjusted, requestTimeoutMs)
+    return klineOnce(rawCode, period, '', '', n, adjusted, requestTimeoutMs, acquire)
   }
 
   // Range path: resolve concrete [start, end].
@@ -285,7 +292,7 @@ export async function fetchKline(rawCode: string, options: FetchKlineOptions, re
 
   // week/month spans never need paging (640 covers 12/53 years).
   if (period !== 'day') {
-    return (await klineOnce(rawCode, period, start, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs)).slice(-cap)
+    return (await klineOnce(rawCode, period, start, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)).slice(-cap)
   }
 
   // day: page forward from `start`, deduping and advancing past each page's
@@ -294,7 +301,7 @@ export async function fetchKline(rawCode: string, options: FetchKlineOptions, re
   const seen = new Set<string>()
   let cursor = start
   while (cursor <= end && out.length < cap) {
-    const page = await klineOnce(rawCode, 'day', cursor, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs)
+    const page = await klineOnce(rawCode, 'day', cursor, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)
     for (const bar of page) {
       if (out.length >= cap) break
       if (seen.has(bar.date)) continue

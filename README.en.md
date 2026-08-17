@@ -17,7 +17,7 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 - **Single source, byte-level decode**: the realtime endpoint `qt.gtimg.cn` returns GBK-encoded, `~`-delimited field strings; decoded as bytes (`TextDecoder('gbk')`) rather than a UTF-8 string. Only the stable core fields ([0..53]) are read, staying tolerant of upstream field variants and unknown tails.
 - **K-line pagination cursor**: Tencent caps one request at 640 bars. `day` paginates forward with a "last date +1" cursor and dedupes; `week` / `month` (640 bars ≈ 12 / 53 years) fit one request; total return hard-capped at 2000 bars.
 - **US history auto-resolves exchange suffix**: Tencent's US history needs a suffixed code like `usAAPL.OQ`; the plugin first resolves the authoritative code from the realtime quote, then feeds it to the K-line API — users only pass the bare `AAPL`.
-- **Rate limiting (anti-ban), three layers**: an in-process TTL cache (5s quotes / 5min K-line) dedupes repeats; concurrent callers for one key share a single in-flight request; a global limiter enforces ≥500ms between any two requests (≤2 QPS) and queues concurrent calls onto future slots — preventing the "too many requests at once" pattern that triggers upstream bans. Combined with the 640-bars-per-request / 2000-total caps, a single K-line query also has a hard request-count bound. The clock and sleeper are injectable so tests can drive time deterministically.
+- **Rate limiting (anti-ban), three layers, down to every HTTP request**: an in-process TTL cache (5s quotes / 5min K-line) dedupes repeats; concurrent callers for one key share a single in-flight request; a global limiter enforces ≥500ms between any two HTTP requests — including each pagination page and each retry attempt (≤2 QPS) — and queues concurrent calls onto future slots, preventing the "too many requests at once" pattern that triggers upstream bans. Combined with the 640-bars-per-request / 2000-total caps, a single K-line query also has a hard request-count bound. The clock and sleeper are injectable so tests can drive time deterministically.
 - **Safe retry strategy**: every attempt carries an `AbortController` timeout (hung requests fail fast); only transient errors (HTTP 5xx, network failure, timeout) are retried — 4xx (incl. the 429 "stop" signal) is never retried; exponential backoff + full jitter (1s→2s→4s), max 3 retries; each retry first queues through the global limiter, never cutting the line or amplifying QPS.
 - **No custom UI**: no `presentCall` / `presentResult`; relies on DSH's generic tool card, keeping front-end coupling low.
 
@@ -66,6 +66,19 @@ Six tunables (`maxRetries` is a non-negative count; the rest are positive-intege
 | `requestTimeoutMs` | 5000 | per-attempt fetch timeout |
 
 Invalid values (negative `maxRetries`, non-positive others) throw at plugin activation.
+
+## Usage recommendations (ranges & counts)
+
+Tencent caps one request at 640 bars with ≥500ms spacing; very large `day` ranges paginate (up to 2000 bars ≈ 4 requests), increasing wait time, request count, and ban risk. The plugin injects the same guidance at session start (systemPrompt):
+
+| Need | Recommended call | Requests |
+|---|---|---|
+| Latest price | `market_quote` | 1 |
+| Short-term trend (≤~2.5y) | `market_kline` `period=day`, `count ≤ 640` | 1 |
+| Long-term trend (multi-year) | `market_kline` `period=week` (~12y) or `period=month` (~53y) | 1 |
+
+- Avoid one-shot very large `day` ranges (>640 bars): they paginate and slow down.
+- For multi-year daily data, prefer several smaller-range queries over one 2000-bar pull.
 
 ## Data source
 

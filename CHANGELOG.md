@@ -4,6 +4,18 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-08-17
+
+### Changed
+
+- 限速下探：每个 HTTP 请求（含日线分页的每一页、重试的每次尝试）都经全局限速器排队，修复此前超大 `day` 区间分页时连发请求、绕过限速的漏洞。
+
+### Added
+
+- 会话启动注入「使用建议」systemPrompt 块，建议合理区间 / 周期与点数，减少等待与封禁风险。
+- `market_kline` 工具描述与参数增加成本提示；结果超过 640 根时回显分页次数与耗时。
+- 输出 schema 新增 `elapsedMs` 字段。
+
 ## [0.2.0] - 2026-08-17
 
 ### Added
