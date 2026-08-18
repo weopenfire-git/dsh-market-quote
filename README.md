@@ -2,6 +2,8 @@
 
 DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_kline` 两个只读工具，用**一个数据源**覆盖 **A股 / 港股 / 美股** 的实时行情与历史日 / 周 / 月 K 线。
 
+> 使用说明（含截图与实测示例）：[docs/USAGE.md](./docs/USAGE.md) ｜ 设计记录：[docs/design.md](./docs/design.md)
+
 > 简体中文 · [English](./README.en.md)
 
 ## 核心亮点
@@ -110,6 +112,7 @@ dsh-market-quote/
 ├── src/                 # index.ts / tencent.ts / cache.ts / service.ts
 ├── tests/               # vitest 用例
 ├── preset/              # 示例 preset 片段
+├── docs/                # design.md（设计记录）/ USAGE.md（使用说明）/ screenshots/（本机截图，未提交）
 ├── validate.mjs         # 免 vitest 运行时校验
 ├── smoke.mjs            # 真实工具注册表冒烟
 ├── tsdown.config.ts

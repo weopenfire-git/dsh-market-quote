@@ -2,6 +2,8 @@
 
 A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` and `market_kline`, covering realtime quotes and historical daily / weekly / monthly K-line for **A-share / Hong Kong / US** markets from a **single data source**.
 
+> Usage guide (screenshots & live examples): [docs/USAGE.md](./docs/USAGE.md) · Design notes: [docs/design.md](./docs/design.md)
+
 > [简体中文](./README.md) · English
 
 ## Highlights
@@ -110,6 +112,7 @@ dsh-market-quote/
 ├── src/                 # index.ts / tencent.ts / cache.ts / service.ts
 ├── tests/               # vitest cases
 ├── preset/              # example preset fragment
+├── docs/                # design.md (notes) / USAGE.md (guide) / screenshots/ (local only, not committed)
 ├── validate.mjs         # vitest-free runtime validation
 ├── smoke.mjs            # real tool-registry smoke
 ├── tsdown.config.ts
