@@ -1,6 +1,6 @@
 # dsh-market-quote
 
-A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` and `market_kline`, covering realtime quotes and historical daily / weekly / monthly K-line for **A-share / Hong Kong / US** markets from a **single data source**.
+A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` and `market_kline`, covering realtime quotes and historical daily / weekly / monthly K-line for **A-share / Hong Kong / US** markets from a **single data source**. **No extra API needed**: data comes from Tencent's public quote interface (free, no key, no sign-up). **Built for the machine**: it returns structured OHLCV data rendered through DSH's generic tool card — no redundant graphical UI.
 
 > Usage guide (screenshots & live examples): [docs/USAGE.md](./docs/USAGE.md) · Design notes: [docs/design.md](./docs/design.md)
 

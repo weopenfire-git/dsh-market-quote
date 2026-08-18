@@ -1,6 +1,6 @@
 # dsh-market-quote
 
-DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_kline` 两个只读工具，用**一个数据源**覆盖 **A股 / 港股 / 美股** 的实时行情与历史日 / 周 / 月 K 线。
+DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_kline` 两个只读工具，用**一个数据源**覆盖 **A股 / 港股 / 美股** 的实时行情与历史日 / 周 / 月 K 线。**无需额外 API**：数据来自腾讯公开行情接口（免费、免 key、免注册）。**专为机器使用**：只返回结构化 OHLCV 数据，依赖 DSH 通用工具卡片渲染，不附带冗余的图形界面。
 
 > 使用说明（含截图与实测示例）：[docs/USAGE.md](./docs/USAGE.md) ｜ 设计记录：[docs/design.md](./docs/design.md)
 
