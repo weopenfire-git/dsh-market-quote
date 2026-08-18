@@ -10,6 +10,7 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 - **No credentials, no config**: Tencent's public quote API — no API key, no Referer; Node ≥22.19 built-in `fetch` + GBK `TextDecoder`, no third-party runtime deps.
 - **Built-in rate limiting (anti-ban)**: global ≤2 QPS spacing (≥500ms) + same-key single-flight + 5s quote / 5min K-line caches flatten bursts into low-rate serial requests, avoiding upstream bans / IP blocks from asking for too much at once; all tunable.
 - **Safe retry**: exponential backoff with jitter (1s→2s→4s, ≤3 tries) only for transient errors (5xx / network / timeout); 4xx (incl. the 429 "stop" signal) is never retried; retries still queue through the global limiter, never amplifying QPS.
+- **Pre-flight confirm for large ranges**: a `day` range over 640 bars (paginated, slow) asks the user before issuing; headless / no-UI callers proceed automatically.
 - **Read-only, concurrency-safe, 30s timeout**: tools are side-effect-free and safe to call concurrently.
 
 ## Design
@@ -19,6 +20,8 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 - **US history auto-resolves exchange suffix**: Tencent's US history needs a suffixed code like `usAAPL.OQ`; the plugin first resolves the authoritative code from the realtime quote, then feeds it to the K-line API — users only pass the bare `AAPL`.
 - **Rate limiting (anti-ban), three layers, down to every HTTP request**: an in-process TTL cache (5s quotes / 5min K-line) dedupes repeats; concurrent callers for one key share a single in-flight request; a global limiter enforces ≥500ms between any two HTTP requests — including each pagination page and each retry attempt (≤2 QPS) — and queues concurrent calls onto future slots, preventing the "too many requests at once" pattern that triggers upstream bans. Combined with the 640-bars-per-request / 2000-total caps, a single K-line query also has a hard request-count bound. The clock and sleeper are injectable so tests can drive time deterministically.
 - **Safe retry strategy**: every attempt carries an `AbortController` timeout (hung requests fail fast); only transient errors (HTTP 5xx, network failure, timeout) are retried — 4xx (incl. the 429 "stop" signal) is never retried; exponential backoff + full jitter (1s→2s→4s), max 3 retries; each retry first queues through the global limiter, never cutting the line or amplifying QPS.
+- **Concurrency cap (semaphore)**: on top of the time-spacing limiter, a `maxConcurrency` (default 3) semaphore bounds in-flight requests, capping memory and upstream load; each request releases its slot when done.
+- **Pre-flight confirmation**: when a `day` range would paginate (`count > 640`), the tool asks through the optional `ctx.userQuestions`; with no provider / non-live root it proceeds silently.
 - **No custom UI**: no `presentCall` / `presentResult`; relies on DSH's generic tool card, keeping front-end coupling low.
 
 ## Tools
@@ -54,7 +57,7 @@ Start a new session with that preset to expose the two tools.
 
 ## Configuration
 
-Six tunables (`maxRetries` is a non-negative count; the rest are positive-integer milliseconds), overridable via plugin `config`:
+Seven tunables (`maxRetries` is a non-negative count; `maxConcurrency` a positive integer; the rest are positive-integer milliseconds), overridable via plugin `config`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -64,8 +67,9 @@ Six tunables (`maxRetries` is a non-negative count; the rest are positive-intege
 | `maxRetries` | 3 | max retries per request (0 disables) |
 | `retryBaseMs` | 1000 | backoff base (1s → 2s → 4s, full jitter) |
 | `requestTimeoutMs` | 5000 | per-attempt fetch timeout |
+| `maxConcurrency` | 3 | max concurrent in-flight requests |
 
-Invalid values (negative `maxRetries`, non-positive others) throw at plugin activation.
+Invalid values (negative `maxRetries`, non-positive `maxConcurrency` or others) throw at plugin activation.
 
 ## Usage recommendations (ranges & counts)
 
@@ -79,6 +83,7 @@ Tencent caps one request at 640 bars with ≥500ms spacing; very large `day` ran
 
 - Avoid one-shot very large `day` ranges (>640 bars): they paginate and slow down.
 - For multi-year daily data, prefer several smaller-range queries over one 2000-bar pull.
+- A very large `day` range (`count > 640`) triggers a pre-flight confirmation; cancel it and switch to `week` / `month`.
 
 ## Data source
 

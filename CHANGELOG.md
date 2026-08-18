@@ -4,6 +4,17 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-08-17
+
+### Added
+
+- 并发上限：新增 `maxConcurrency`（默认 3）信号量，除时间间隔限速外另设并发在途请求硬上限。
+- 超大区间发出前确认：`market_kline` 检测到 `day` 区间 `count > 640`（会分页）时，经可选 `ctx.userQuestions` 询问用户；无 provider / 非 live root 时静默放行。
+
+### Changed
+
+- `Acquire` 门控改为「acquire → fetch → release」，每个请求既过时间限速、又占并发槽并随用随放。
+
 ## [0.3.0] - 2026-08-17
 
 ### Changed

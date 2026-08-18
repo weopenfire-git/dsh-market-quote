@@ -39,7 +39,7 @@ const service = await import(pathToFileURL(join(tmpDir, 'service.js')).href)
 const { qqCode, fetchQuotes, fetchKline } = tencent
 const { TtlCache, RateLimiter } = cache
 const { MarketDataService, resolveMarketDataConfig } = service
-const noopAcquire = async () => {}
+const noopAcquire = () => Promise.resolve(() => {})
 
 let failures = 0
 function check(label, actual, expected) {
@@ -135,7 +135,7 @@ const q1 = await svc.quote('sh600000')
 const q2 = await svc.quote('sh600000')
 check('service caches quote (one fetch)', fetchCount, 1)
 check('service returns same quote', q1 === q2, true)
-check('service config defaults', resolveMarketDataConfig(), { quoteTtlMs: 5000, klineTtlMs: 300000, minRequestIntervalMs: 500, maxRetries: 3, retryBaseMs: 1000, requestTimeoutMs: 5000 })
+check('service config defaults', resolveMarketDataConfig(), { quoteTtlMs: 5000, klineTtlMs: 300000, minRequestIntervalMs: 500, maxRetries: 3, retryBaseMs: 1000, requestTimeoutMs: 5000, maxConcurrency: 3 })
 let threw = false
 try { resolveMarketDataConfig({ quoteTtlMs: 0 }) } catch { threw = true }
 check('service rejects non-positive config', threw, true)

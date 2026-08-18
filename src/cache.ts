@@ -1,10 +1,11 @@
 /**
- * In-memory TTL cache and a simple request rate limiter.
+ * In-memory TTL cache, a request rate limiter, and a concurrency semaphore.
  *
- * Both are dependency-free and take injectable `now`/`sleep` so unit tests can
+ * All are dependency-free and take injectable `now`/`sleep` so unit tests can
  * drive time deterministically. The limiter is a fixed-minimum-interval gate:
  * concurrent callers each receive a distinct future slot, so a burst is spaced
- * out rather than firing together.
+ * out rather than firing together. The semaphore bounds how many requests are
+ * in flight at once.
  * @module dsh-market-quote/cache
  */
 
@@ -66,5 +67,35 @@ export class RateLimiter {
     const waitMs = Math.max(0, this.nextAt - now)
     this.nextAt = Math.max(now, this.nextAt) + this.minIntervalMs
     if (waitMs > 0) await this.doSleep(waitMs)
+  }
+}
+
+/** A counting semaphore bounding the number of concurrent in-flight operations. */
+export class Semaphore {
+  private active = 0
+  private readonly queue: Array<() => void> = []
+
+  /** @param limit - max concurrent operations (positive integer). */
+  constructor(private readonly limit: number) {}
+
+  /** Claim a slot; resolves to a release function once a slot is free. */
+  acquire(): Promise<() => void> {
+    if (this.active < this.limit) {
+      this.active += 1
+      return Promise.resolve(() => this.release())
+    }
+    return new Promise<() => void>(resolve => {
+      this.queue.push(() => {
+        this.active += 1
+        resolve(() => this.release())
+      })
+    })
+  }
+
+  /** Release one slot and hand it to the next waiter, if any. */
+  private release(): void {
+    this.active -= 1
+    const next = this.queue.shift()
+    if (next !== undefined) next()
   }
 }

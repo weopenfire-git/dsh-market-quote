@@ -1,10 +1,10 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { qqCode, fetchQuotes, fetchKline, type Quote } from '../src/tencent.ts'
 import { apply } from '../src/index.ts'
-import { RateLimiter, TtlCache } from '../src/cache.ts'
+import { RateLimiter, Semaphore, TtlCache } from '../src/cache.ts'
 import { MarketDataService, resolveMarketDataConfig } from '../src/service.ts'
 
-const noopAcquire = async () => {}
+const noopAcquire = () => Promise.resolve(() => {})
 
 /** A minimal fake of the Cordis ctx surface `apply` needs: a tools and systemPrompt registry. */
 function fakeCtx() {
@@ -116,7 +116,7 @@ describe('kline request', () => {
       ok: true, status: 200,
       json: async () => ({ code: 0, data: { sh600000: { day: pages.shift() } } }),
     }))
-    const acquire = vi.fn(async () => {})
+    const acquire = vi.fn(async () => () => {})
     vi.stubGlobal('fetch', fetchMock)
     const bars = await fetchKline('sh600000', { period: 'day', start: '2023-01-01', end: '2025-12-31', count: 2000 }, 5000, acquire)
     expect(fetchMock).toHaveBeenCalledTimes(2)
@@ -148,6 +148,21 @@ describe('RateLimiter', () => {
   })
 })
 
+describe('Semaphore', () => {
+  it('bounds in-flight acquires to the limit and releases a slot', async () => {
+    const sem = new Semaphore(2)
+    const r1 = await sem.acquire()
+    const r2 = await sem.acquire()
+    let thirdAcquired = false
+    const third = sem.acquire().then(release => { thirdAcquired = true; release() })
+    expect(thirdAcquired).toBe(false) // limit 2 reached, third is still queued
+    r1() // free one slot → the queued third proceeds
+    await third
+    expect(thirdAcquired).toBe(true)
+    r2()
+  })
+})
+
 describe('MarketDataService', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
@@ -167,6 +182,11 @@ describe('MarketDataService', () => {
 
   it('validates config and rejects a non-positive field', () => {
     expect(() => resolveMarketDataConfig({ quoteTtlMs: 0 })).toThrow(/integer >= 1/)
+  })
+
+  it('defaults maxConcurrency and rejects a non-positive value', () => {
+    expect(resolveMarketDataConfig().maxConcurrency).toBe(3)
+    expect(() => resolveMarketDataConfig({ maxConcurrency: 0 })).toThrow(/integer >= 1/)
   })
 
   it('allows maxRetries 0 (disable) but rejects negative', () => {
@@ -201,5 +221,49 @@ describe('MarketDataService', () => {
     const svc = new MarketDataService(resolveMarketDataConfig({ minRequestIntervalMs: 1, retryBaseMs: 1, maxRetries: 2 }))
     await expect(svc.quote('sh600000')).rejects.toThrow(/502/)
     expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('large-range confirmation', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  function fakeCtxWithQuestions(ask: (questions: unknown) => unknown) {
+    let klineExecute: any
+    const ctx = {
+      tools: {
+        register: (def: any) => { if (def.name === 'market_kline') klineExecute = def.execute; return () => {} },
+      },
+      systemPrompt: { context: () => () => {} },
+      get: (name: string) => (name === 'userQuestions' ? { ask } : undefined),
+    } as any
+    apply(ctx)
+    return { ctx, get execute() { return klineExecute } }
+  }
+
+  it('asks for confirmation and cancels a paginated day range', async () => {
+    const asked: string[] = []
+    const { execute } = fakeCtxWithQuestions(async (req: any) => {
+      asked.push(req.questions[0].id)
+      return { answers: [{ id: 'confirm-large-range', selected: ['取消'] }] }
+    })
+    const result = await execute(
+      { symbol: '600000', market: 'cn', period: 'day', start: '2020-01-01', end: '2026-01-01', count: 2000 },
+      { agent: undefined, signal: undefined },
+    )
+    expect(asked).toEqual(['confirm-large-range'])
+    expect(result.cancelled).toBe(true)
+  })
+
+  it('proceeds without asking when no userQuestions provider is present', async () => {
+    const { execute } = fakeCtxWithQuestions(async () => { throw new Error('should not be called') })
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ code: 0, data: { sh600000: { day: [] } } }),
+    })))
+    const result = await execute(
+      { symbol: '600000', market: 'cn', period: 'day', start: '2020-01-01', end: '2026-01-01', count: 2000 },
+      { agent: undefined, signal: undefined },
+    )
+    expect(result.cancelled).toBe(false)
+    expect(result.bars).toEqual([])
   })
 })

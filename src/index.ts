@@ -24,8 +24,61 @@ export const name = 'dsh-market-quote'
 /** Services required by the plugin's tools and usage guidance. */
 export const inject = ['tools', 'systemPrompt']
 
-/** Plugin config: cache lifetimes, request spacing, and retry (all in MarketDataConfig). */
+/** Plugin config: cache lifetimes, request spacing, retry, and concurrency (all in MarketDataConfig). */
 export interface Config extends MarketDataConfig {}
+
+/** Minimal structural answer from the optional `ctx.userQuestions` service. */
+interface UserQuestionAnswer {
+  answers: Array<{ id: string; selected: string[] }>
+}
+
+/** Minimal structural view of the optional `ctx.userQuestions` service. */
+interface UserQuestionsLike {
+  ask(request: {
+    questions: Array<{
+      id: string
+      question: string
+      header?: string
+      options?: Array<{ label: string; description?: string }>
+    }>
+    agent?: unknown
+    signal?: AbortSignal
+  }): Promise<UserQuestionAnswer>
+}
+
+/**
+ * Ask the user to confirm a paginated (slow) large-range query before issuing
+ * it. Resolves `true` when there is no provider or the caller is not a live
+ * root, so headless / delegated callers proceed without blocking.
+ */
+async function confirmLargeRange(
+  ctx: Context,
+  exec: { agent?: unknown; signal?: AbortSignal },
+  pages: number,
+): Promise<boolean> {
+  const userQuestions = ctx.get('userQuestions') as UserQuestionsLike | undefined
+  if (userQuestions === undefined) return true
+  try {
+    const answer = await userQuestions.ask({
+      questions: [{
+        id: 'confirm-large-range',
+        header: '大区间查询确认',
+        question: `该查询需分页约 ${pages} 次（每次请求间隔 ≥500ms），可能等待较久。是否继续？`,
+        options: [
+          { label: '继续', description: '接受较长等待，立即查询' },
+          { label: '取消，改用周线/月线', description: 'period=week/month 单请求覆盖多年，更快' },
+        ],
+      }],
+      agent: exec.agent,
+      signal: exec.signal,
+    })
+    const choice = answer.answers.find(item => item.id === 'confirm-large-range')
+    return choice?.selected[0] === '继续'
+  } catch {
+    // No provider / not a live root: fall back to proceeding without confirmation.
+    return true
+  }
+}
 
 /**
  * Register the `market_quote` and `market_kline` tools.
@@ -151,6 +204,7 @@ export function apply(ctx: Context, config?: Config): void {
           market: { type: 'string', required: true },
           period: { type: 'string', required: true },
           elapsedMs: { type: 'number', required: true },
+          cancelled: { type: 'boolean', required: true },
           bars: {
             type: 'array',
             required: true,
@@ -169,6 +223,9 @@ export function apply(ctx: Context, config?: Config): void {
         },
       },
       render: (_args, value) => {
+        if (value.cancelled) {
+          return [{ type: 'text', text: `${value.symbol} (${value.market.toUpperCase()}): cancelled — large-range query not confirmed` }]
+        }
         if (value.bars.length === 0) {
           return [{ type: 'text', text: `${value.symbol} (${value.market.toUpperCase()}): no bars returned` }]
         }
@@ -185,9 +242,24 @@ export function apply(ctx: Context, config?: Config): void {
     },
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const market: Market = args.market
       const period = args.period ?? 'day'
+      // A day-range query over 640 bars paginates (up to ~4 requests); confirm first.
+      const pages = Math.ceil(Math.min(2_000, args.count ?? 640) / 640)
+      if (period === 'day' && pages > 1 && (args.start !== undefined || args.end !== undefined)) {
+        const ok = await confirmLargeRange(ctx, exec, pages)
+        if (!ok) {
+          return {
+            symbol: args.symbol,
+            market,
+            period,
+            elapsedMs: 0,
+            cancelled: true,
+            bars: [],
+          }
+        }
+      }
       const baseRaw = qqCode(args.symbol, market)
       // US history requires the exchange suffix (e.g. AAPL.OQ); resolve it from
       // the live quote, which returns the canonical market-qualified code.
@@ -205,6 +277,7 @@ export function apply(ctx: Context, config?: Config): void {
         market,
         period,
         elapsedMs: Date.now() - startedAt,
+        cancelled: false,
         bars: bars.map(b => ({ ...b })),
       }
     },

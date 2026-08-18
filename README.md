@@ -10,6 +10,7 @@ DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_
 - **零凭证、零配置**：腾讯公开行情接口，免 API key、免 Referer；Node ≥22.19 内置 `fetch` 与 GBK `TextDecoder`，无第三方运行时依赖。
 - **内置限流防封**：全局限速 ≤2 QPS（两次请求间隔 ≥500ms）+ 同 key 单飞 + 报价 5s / K 线 5min 缓存，把并发突发摊平为低频串行请求，避免「一次性要太多」触发上游封禁 / IP 封锁；均可配置。
 - **安全重试**：只对临时错误（5xx / 网络失败 / 超时）做指数退避重试（1s→2s→4s + 全抖动，≤3 次）；4xx（含 429「停」信号）绝不重试；重试同样排队走全局限速，不放大 QPS。
+- **超大区间发出前确认**：`day` 区间超过 640 根（会分页、等待变长）时，先询问用户是否继续；无 UI / headless 时自动放行。
 - **只读、并发安全、30s 超时**：工具无副作用，可安全并发调用。
 
 ## 技术设计
@@ -19,6 +20,8 @@ DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_
 - **美股历史自动补交易所后缀**：腾讯美股历史要求 `usAAPL.OQ` 之类带后缀的代码，插件先从实时报价解析出权威代码再喂给 K 线接口，用户只传裸代码 `AAPL`。
 - **限流防封（三层，下探到每个 HTTP 请求）**：进程内 TTL 缓存（报价 5s / K 线 5min）去重；同 key 并发合并为一次在途请求（single-flight）；全局限速器保证任意两次 HTTP 请求——含日线分页的每一页、重试的每次尝试——间隔 ≥500ms（≤2 QPS），并发调用排队到未来时隙、逐个放行——从源头避免「短时间大量请求」触发上游封禁 / IP 封锁。配合 K 线单请求 640 根、总量 2000 根的上限，单次查询的请求数也有硬边界。时钟与睡眠可注入，单测可确定性驱动时间。
 - **安全重试策略**：每次尝试带 `AbortController` 超时（挂死请求快速失败）；只重试临时错误（HTTP 5xx、网络失败、超时），4xx（含 429「停」信号）绝不重试；指数退避 + 全抖动（1s→2s→4s）+ 最多 3 次；每次重试先经全局限速器排队，绝不插队、不放大 QPS。
+- **并发上限（信号量）**：除时间间隔限速外，另设 `maxConcurrency`（默认 3）在途请求上限，极端并发下内存与上游负载也有硬边界，每次请求用后释放。
+- **大区间发出前确认**：检测到 `day` 区间会分页（`count > 640`）时，经可选 `ctx.userQuestions` 询问用户；无 provider / 非 live root 时静默放行，不阻塞。
 - **无 UI 定制**：不写 `presentCall` / `presentResult`，复用 DSH 通用工具卡片，减少前端耦合。
 
 ## 工具
@@ -54,7 +57,7 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 
 ## 配置
 
-六个 tunable（`maxRetries` 为次数、非负；其余为毫秒、正整数），经插件 `config` 覆盖：
+七个 tunable（`maxRetries` 为次数、非负；`maxConcurrency` 为正整数；其余为毫秒、正整数），经插件 `config` 覆盖：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -64,8 +67,9 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 | `maxRetries` | 3 | 单请求最大重试次数（0 关闭重试） |
 | `retryBaseMs` | 1000 | 退避基数（1s → 2s → 4s，全抖动） |
 | `requestTimeoutMs` | 5000 | 单次尝试的 fetch 超时 |
+| `maxConcurrency` | 3 | 并发在途请求上限 |
 
-非法值（`maxRetries` 为负、其余非正整数）在插件激活时抛错。
+非法值（`maxRetries` 为负、`maxConcurrency` 非正、其余非正整数）在插件激活时抛错。
 
 ## 使用建议（推荐区间与点数）
 
@@ -79,6 +83,7 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 
 - 避免一次性请求超大 `day` 区间（>640 根）：会分页、等待变长、请求数变多。
 - 需要多年日线时，宁可分多次小区间查询，也不要一次拉满 2000 根。
+- 超大 `day` 区间（`count > 640`）会在发出前弹确认，取消后可改用 `week` / `month`。
 
 ## 数据源
 

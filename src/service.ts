@@ -10,7 +10,7 @@
 
 import type { Bar, FetchKlineOptions, Quote } from './tencent.ts'
 import { fetchKline, fetchQuote, isTransientError } from './tencent.ts'
-import { RateLimiter, sleep, TtlCache } from './cache.ts'
+import { RateLimiter, Semaphore, sleep, TtlCache } from './cache.ts'
 
 /** Tunables for {@link MarketDataService}; cache/interval/backoff fields are ms, `maxRetries` is a count. */
 export interface MarketDataConfig {
@@ -26,6 +26,8 @@ export interface MarketDataConfig {
   retryBaseMs?: number
   /** Hard per-attempt fetch timeout (AbortController). */
   requestTimeoutMs?: number
+  /** Max concurrent in-flight HTTP requests. */
+  maxConcurrency?: number
 }
 
 /** Default quote cache lifetime (5 s): quotes move, but not every keystroke. */
@@ -40,6 +42,8 @@ export const DEFAULT_MAX_RETRIES = 3
 export const DEFAULT_RETRY_BASE_MS = 1_000
 /** Default per-attempt fetch timeout (5 s). */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5_000
+/** Default max concurrent in-flight requests. */
+export const DEFAULT_MAX_CONCURRENCY = 3
 
 /** Validate and default the raw config; fails loud on a non-positive-integer field. */
 export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Required<MarketDataConfig> {
@@ -50,6 +54,7 @@ export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Req
     maxRetries: config?.maxRetries ?? DEFAULT_MAX_RETRIES,
     retryBaseMs: config?.retryBaseMs ?? DEFAULT_RETRY_BASE_MS,
     requestTimeoutMs: config?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    maxConcurrency: config?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
   }
   for (const [key, value] of Object.entries(resolved)) {
     const min = key === 'maxRetries' ? 0 : 1
@@ -75,6 +80,7 @@ export class MarketDataService {
   private readonly quoteCache: TtlCache<string, Quote>
   private readonly klineCache: TtlCache<string, Bar[]>
   private readonly limiter: RateLimiter
+  private readonly semaphore: Semaphore
   private readonly quoteInFlight = new Map<string, Promise<Quote>>()
   private readonly klineInFlight = new Map<string, Promise<Bar[]>>()
 
@@ -82,6 +88,7 @@ export class MarketDataService {
     this.quoteCache = new TtlCache(config.quoteTtlMs)
     this.klineCache = new TtlCache(config.klineTtlMs)
     this.limiter = new RateLimiter(config.minRequestIntervalMs)
+    this.semaphore = new Semaphore(config.maxConcurrency)
   }
 
   /** Realtime quote for one Tencent code, cached and single-flight. */
@@ -109,7 +116,7 @@ export class MarketDataService {
 
   private async loadQuote(rawCode: string): Promise<Quote> {
     return this.withRetry(async () => {
-      const quote = await fetchQuote(rawCode, this.config.requestTimeoutMs, () => this.limiter.acquire())
+      const quote = await fetchQuote(rawCode, this.config.requestTimeoutMs, () => this.acquireSlot())
       this.quoteCache.set(rawCode, quote)
       return quote
     })
@@ -117,10 +124,19 @@ export class MarketDataService {
 
   private async loadKline(rawCode: string, options: FetchKlineOptions, key: string): Promise<Bar[]> {
     return this.withRetry(async () => {
-      const bars = await fetchKline(rawCode, options, this.config.requestTimeoutMs, () => this.limiter.acquire())
+      const bars = await fetchKline(rawCode, options, this.config.requestTimeoutMs, () => this.acquireSlot())
       this.klineCache.set(key, bars)
       return bars
     })
+  }
+
+  /**
+   * Claim one request slot: first the time-based limiter (≥500ms spacing), then
+   * a concurrency slot (released when the fetch finishes).
+   */
+  private async acquireSlot(): Promise<() => void> {
+    await this.limiter.acquire()
+    return this.semaphore.acquire()
   }
 
   /**

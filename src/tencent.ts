@@ -87,18 +87,19 @@ export function qqCode(code: string, market: Market): string {
   }
 }
 
-/** A slot-claiming gate every HTTP request passes through before fetching. */
-export type Acquire = () => Promise<void>
+/** A slot-claiming gate every HTTP request passes through; resolves to the slot release. */
+export type Acquire = () => Promise<() => void>
 
-/** Claim the request gate, then fetch with a hard per-attempt timeout; aborts (AbortError) after `timeoutMs`. */
+/** Claim the request gate, then fetch with a hard per-attempt timeout; releases the slot afterwards. */
 async function fetchWithTimeout(url: string, timeoutMs: number, acquire: Acquire): Promise<Response> {
-  await acquire()
+  const release = await acquire()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(url, { redirect: 'error', signal: controller.signal })
   } finally {
     clearTimeout(timer)
+    release()
   }
 }
 
