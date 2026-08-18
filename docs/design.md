@@ -49,3 +49,11 @@
 
 - US `end` 缺省的「今天」用 UTC-5 近似（忽略夏令时），US 当地时间午夜前后可能差 1 小时、极端情况差 1 天。
 - 美股历史依赖实时报价 `f[2]` 提供交易所后缀（实测 AAPL/KO/BRK.B 均带后缀）；解析不到时现在 fail-loud 报错，不会静默出错。
+
+## 4. 发布记录
+
+- **2026-08-18**：npm `dsh-market-quote@0.6.1`（`latest`）发布成功，维护者 `yinging`；GitHub tag `v0.6.1` 与 npm 版本一致（双发布完成）。
+- npm 包内容（`files` 白名单）：`lib/index.js` + `lib/types/**/*.d.ts` + README（中英）+ LICENSE + CHANGELOG；`docs/` 与 `src/` 不进包。
+- README 中三张截图用 **GitHub raw 绝对链接**（`docs/screenshots/` 已提交仓库；`docs/` 不进 npm 包，相对路径在 npm 页面会裂图——0.6.1 修复）。
+- 依赖形态：`peerDependencies`（cordis / dsh-system-prompt / dsh-tools），无运行时 `dependencies`（腾讯公开接口免 key，无第三方运行时依赖）。
+- 后续：可向 [awesome-deepseek-harness](https://github.com/0xsline/awesome-deepseek-harness)（Domain & Specialist Skills 分类）提 PR 收录。
