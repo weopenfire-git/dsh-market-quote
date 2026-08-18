@@ -37,6 +37,12 @@ DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_
 - `symbol` 用裸代码：A股 `600000` / `000001`、港股 `00700`、美股 `AAPL`。
 - `day` 超 640 根自动分页；总返回上限 2000 根。
 
+**使用示例**（Web GUI 实测）：
+
+![market_quote 实时报价示例](docs/screenshots/1.png)
+
+![market_kline 历史K线示例](docs/screenshots/2.png)
+
 ## 安装
 
 ### `dsh plugin add`（推荐）
@@ -56,6 +62,12 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 ```
 
 新建会话选该预设，即可看到两个工具。
+
+### Web GUI：新建会话选「行情模式」
+
+Web 界面新建会话时，从预设下拉选择「行情模式」（前面四个是官方内置模式）即可加载本插件：
+
+![选择行情模式](docs/screenshots/0-mode-dropdown.png)
 
 ## 配置
 

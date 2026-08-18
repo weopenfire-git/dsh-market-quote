@@ -37,6 +37,12 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 - `symbol` is bare: A-share `600000` / `000001`, HK `00700`, US `AAPL`.
 - `day` paginates past 640 bars; total return capped at 2000 bars.
 
+**Usage examples** (live Web GUI):
+
+![market_quote realtime quote example](docs/screenshots/1.png)
+
+![market_kline historical K-line example](docs/screenshots/2.png)
+
 ## Install
 
 ### `dsh plugin add` (recommended)
@@ -56,6 +62,12 @@ Copy a `standard` preset and append one line to `agent.cordis.yml` (source loads
 ```
 
 Start a new session with that preset to expose the two tools.
+
+### Web GUI: pick the Market mode in a new session
+
+When starting a new session in the Web GUI, pick **行情模式 (Market mode)** from the preset dropdown (the first four are official built-in modes) to load this plugin:
+
+![Pick the Market mode](docs/screenshots/0-mode-dropdown.png)
 
 ## Configuration
 
