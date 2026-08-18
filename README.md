@@ -39,9 +39,9 @@ DeepSeek Harness 行情工具插件：为 Agent 注册 `market_quote` / `market_
 
 **使用示例**（Web GUI 实测）：
 
-![market_quote 实时报价示例](docs/screenshots/1.png)
+![market_quote 实时报价示例](https://raw.githubusercontent.com/weopenfire-git/dsh-market-quote/main/docs/screenshots/1.png)
 
-![market_kline 历史K线示例](docs/screenshots/2.png)
+![market_kline 历史K线示例](https://raw.githubusercontent.com/weopenfire-git/dsh-market-quote/main/docs/screenshots/2.png)
 
 ## 安装
 
@@ -67,7 +67,7 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 
 Web 界面新建会话时，从预设下拉选择「行情模式」（前面四个是官方内置模式）即可加载本插件：
 
-![选择行情模式](docs/screenshots/0-mode-dropdown.png)
+![选择行情模式](https://raw.githubusercontent.com/weopenfire-git/dsh-market-quote/main/docs/screenshots/0-mode-dropdown.png)
 
 ## 配置
 

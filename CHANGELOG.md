@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.6.1] - 2026-08-18
+
+### Fixed
+
+- npm 包 README 中的三张截图改为 GitHub raw 绝对链接，修复 npm 包页面上相对路径图片失效的问题（`docs/` 不进 npm 包，相对路径在 npm 页面无法解析）。
+
 ## [0.6.0] - 2026-08-17
 
 ### Fixed

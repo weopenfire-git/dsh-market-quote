@@ -39,9 +39,9 @@ A DeepSeek Harness tool plugin: registers two read-only tools, `market_quote` an
 
 **Usage examples** (live Web GUI):
 
-![market_quote realtime quote example](docs/screenshots/1.png)
+![market_quote realtime quote example](https://raw.githubusercontent.com/weopenfire-git/dsh-market-quote/main/docs/screenshots/1.png)
 
-![market_kline historical K-line example](docs/screenshots/2.png)
+![market_kline historical K-line example](https://raw.githubusercontent.com/weopenfire-git/dsh-market-quote/main/docs/screenshots/2.png)
 
 ## Install
 
@@ -67,7 +67,7 @@ Start a new session with that preset to expose the two tools.
 
 When starting a new session in the Web GUI, pick **行情模式 (Market mode)** from the preset dropdown (the first four are official built-in modes) to load this plugin:
 
-![Pick the Market mode](docs/screenshots/0-mode-dropdown.png)
+![Pick the Market mode](https://raw.githubusercontent.com/weopenfire-git/dsh-market-quote/main/docs/screenshots/0-mode-dropdown.png)
 
 ## Configuration
 
