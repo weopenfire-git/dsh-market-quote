@@ -30,7 +30,7 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
   name: 'file:///D:/path/to/dsh-market-quote/src/index.ts'
 ```
 
-**⚠️ 实测提醒**：新建会话默认走 `standard` 预设，**并不会自动挂载本插件**——实测在全新会话里问「茅台最新价」，Agent 退回去用 web 搜索（返回旧数据），而不是 `market_quote`。所以必须先在预设里挂载，新会话才会有这两个工具（见 [§7 实测记录](#7-实测记录)）。
+**新建会话记得选模式**：建新会话时，从预设下拉选择「行情模式」（前面四个是官方内置模式）。选对模式后新会话才有 `market_quote` / `market_kline`；若用默认模式，Agent 不会有行情工具（实测会退回 web 搜索，见 [§5 截图 03](#5-界面截图)）。
 
 ## 3. 工具用法
 
@@ -77,9 +77,13 @@ AAPL (US) month: 30 bars (2024-03-28..2026-08-17)，2026-08-17 收 304.29
 |---|---|
 | `docs/screenshots/00-landing.png` | GUI 首页：会话列表（含「查询美股行情示例」） |
 | `docs/screenshots/01-new-session.png` | 新建会话 |
+| `docs/screenshots/10-mode-dropdown.png` | **关键**：新建会话时从预设下拉选择「行情模式」（前面四个是官方内置模式） |
+| `docs/screenshots/20-market-mode-selected.png` | 已选「行情模式」 |
 | `docs/screenshots/02-typed.png` | 输入问题「查一下A股贵州茅台（600519）的最新价」 |
-| `docs/screenshots/03-result.png` | **实测发现**：默认新会话未挂载插件，Agent 退回 web 搜索（返回东方财富数据）而非 `market_quote` |
-| `docs/screenshots/10-market-session.png` | 打开含本插件的会话（真实行情工具调用与结果） |
+| `docs/screenshots/21-market-tool-result.png` | **market_quote 生效**：贵州茅台 600519 最新价 1297.99（+0.38%），含今开/最高/最低/昨收 |
+| `docs/screenshots/22-kline-result.png` | **market_kline 生效**：中国移动 00941 周K；模型注意到渲染只显示末 3 根后自动带日期区间重查 |
+| `docs/screenshots/03-result.png` | 反面示例：新建会话**未选行情模式**（默认模式），Agent 退回 web 搜索而非 `market_quote` |
+| `docs/screenshots/10-market-session.png` | 本会话（含真实行情工具调用与结果） |
 | `docs/screenshots/11-market-session-top.png` | 同上，滚动查看上部工具行 |
 
 ## 6. 配置
@@ -101,7 +105,8 @@ AAPL (US) month: 30 bars (2024-03-28..2026-08-17)，2026-08-17 收 304.29
 
 - **2026-08-17 实测**：A股 600519 / 港股 00700、00941 / 美股 AAPL、KO 的实时与日/周/月 K 线全部正常；`day` 大区间向后翻页实测返回完整区间（如 2020-01-01..2026-08-17 共 1605 根，而非旧逻辑的 640 根）。
 - **防封链路实测**：限流 ≤2 QPS、逐请求重试、取消信号、超大区间确认均生效；`429` 不重试、4xx 不重试。
-- **预设提醒（重要）**：默认 `standard` 预设不含本插件（见 §2.2 与截图 `03-result.png`）；挂载后新会话才有行情工具。
+- **GUI 端到端（无头 Chrome 实测）**：新建会话 → 预设下拉选「行情模式」→ 问「茅台最新价」→ Agent 调用 `market_quote`（返回 1297.99 +0.38%）；问「中国移动近一年周K」→ 调用 `market_kline`。选默认模式（未选行情模式）时 Agent 会退回 web 搜索（见 §5）。
+- **模式选择（重要）**：新建会话需在预设下拉选择「行情模式」才有行情工具（见 §2.2 与截图 `10-mode-dropdown.png`）；选默认模式时 Agent 会退回 web 搜索。
 
 ## 8. 已知限制
 
