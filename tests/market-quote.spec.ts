@@ -1,10 +1,14 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { qqCode, fetchQuotes, fetchKline, type Quote } from '../src/tencent.ts'
+import { qqCode, fetchQuotes, fetchKline, fetchQuote, type Quote, type Transport } from '../src/tencent.ts'
 import { apply } from '../src/index.ts'
 import { RateLimiter, Semaphore, TtlCache } from '../src/cache.ts'
 import { MarketDataService, resolveMarketDataConfig } from '../src/service.ts'
 
 const noopAcquire = () => Promise.resolve(() => {})
+
+function testTransport(overrides: Partial<Transport> = {}): Transport {
+  return { requestTimeoutMs: 5000, maxRetries: 0, retryBaseMs: 1, acquire: noopAcquire, ...overrides }
+}
 
 /** A minimal fake of the Cordis ctx surface `apply` needs: a tools and systemPrompt registry. */
 function fakeCtx() {
@@ -46,7 +50,7 @@ describe('tencent realtime parsing', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(body).buffer,
     })))
-    const quotes = await fetchQuotes(['sh600000'], 5000, noopAcquire)
+    const quotes = await fetchQuotes(['sh600000'], testTransport())
     const q = quotes[0] as Quote
     expect(q.code).toBe('600000')
     expect(q.price).toBeCloseTo(9.1, 2)
@@ -59,7 +63,7 @@ describe('tencent realtime parsing', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(body).buffer,
     })))
-    const quotes = await fetchQuotes(['usBRK.B'], 5000, noopAcquire)
+    const quotes = await fetchQuotes(['usBRK.B'], testTransport())
     expect(quotes[0]?.code).toBe('BRK.B')
     expect(quotes[0]?.name).toBe('Berkshire Hathaway')
   })
@@ -84,7 +88,7 @@ describe('kline request', () => {
         return json
       },
     })))
-    const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, 5000, noopAcquire)
+    const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, testTransport())
     expect(bars).toHaveLength(2)
     expect(bars[1]).toEqual({ date: '2026-08-14', open: 9.14, close: 9.1, high: 9.17, low: 9.06, volume: 436231 })
   })
@@ -97,7 +101,7 @@ describe('kline request', () => {
         return { code: 0, data: { sh600000: { day: [] } } }
       },
     })))
-    await fetchKline('sh600000', { period: 'day', count: 5000 }, 5000, noopAcquire)
+    await fetchKline('sh600000', { period: 'day', count: 5000 }, testTransport())
   })
 
   it('passes a date range and sorts bars oldest-first', async () => {
@@ -112,7 +116,7 @@ describe('kline request', () => {
         ] } } }
       },
     })))
-    const bars = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, 5000, noopAcquire)
+    const bars = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, testTransport())
     expect(bars.map(b => b.date)).toEqual(['2025-06-02', '2025-06-03'])
   })
 
@@ -132,12 +136,45 @@ describe('kline request', () => {
     }))
     const acquire = vi.fn(async () => () => {})
     vi.stubGlobal('fetch', fetchMock)
-    const bars = await fetchKline('sh600000', { period: 'day', start: '2023-01-01', end: '2025-12-31', count: 2000 }, 5000, acquire)
+    const bars = await fetchKline('sh600000', { period: 'day', start: '2023-01-01', end: '2025-12-31', count: 2000 }, testTransport({ acquire }))
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(acquire).toHaveBeenCalledTimes(2)
     expect(bars).toHaveLength(650)
     expect(bars[0]?.date).toBe('2023-12-23') // oldest (older page, after reversal)
     expect(bars.at(-1)?.date).toBe('2025-12-31') // newest (newest page)
+  })
+})
+
+describe('per-request retry & cancellation', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('retries only the failed page, not the whole pagination', async () => {
+    const genBarsEndingAt = (n: number, endIso: string): string[][] => {
+      const endMs = Date.parse(endIso)
+      return Array.from({ length: n }, (_, i) => {
+        const date = new Date(endMs - (n - 1 - i) * 86_400_000).toISOString().slice(0, 10)
+        return [date, '9.00', '9.10', '9.20', '8.90', '1000']
+      })
+    }
+    const responses = [
+      { ok: true, status: 200, json: async () => ({ code: 0, data: { sh600000: { day: genBarsEndingAt(640, '2025-12-31') } } }) },
+      { ok: false, status: 502 },
+      { ok: true, status: 200, json: async () => ({ code: 0, data: { sh600000: { day: genBarsEndingAt(10, '2024-01-01') } } }) },
+    ]
+    const fetchMock = vi.fn(async () => responses.shift())
+    vi.stubGlobal('fetch', fetchMock)
+    const bars = await fetchKline('sh600000', { period: 'day', start: '2023-01-01', end: '2025-12-31', count: 2000 }, testTransport({ maxRetries: 1, retryBaseMs: 1 }))
+    expect(fetchMock).toHaveBeenCalledTimes(3) // page1 + page2-fail + page2-retry (page1 not re-fetched)
+    expect(bars).toHaveLength(650)
+  })
+
+  it('does not fetch or retry when the external signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(0) }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchQuote('sh600000', testTransport({ signal: controller.signal, maxRetries: 3 }))).rejects.toThrow(/aborted/)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 

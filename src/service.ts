@@ -3,14 +3,15 @@
  *
  * One instance per plugin mount owns the quote/K-line caches and the shared
  * request gate. Cache misses are single-flight: concurrent callers for the same
- * key await one shared in-flight request instead of each hitting the API, and
- * every API request passes through the limiter so bursts are spaced out.
+ * key await one shared in-flight request instead of each hitting the API. The
+ * data layer retries each HTTP request individually (per request, not per
+ * operation) and passes the owning call's cancellation signal through.
  * @module dsh-market-quote/service
  */
 
-import type { Bar, FetchKlineOptions, Quote } from './tencent.ts'
-import { fetchKline, fetchQuote, isTransientError } from './tencent.ts'
-import { RateLimiter, Semaphore, sleep, TtlCache } from './cache.ts'
+import type { Bar, FetchKlineOptions, Quote, Transport } from './tencent.ts'
+import { fetchKline, fetchQuote } from './tencent.ts'
+import { RateLimiter, Semaphore, TtlCache } from './cache.ts'
 
 /** Tunables for {@link MarketDataService}; cache/interval/backoff fields are ms, `maxRetries` is a count. */
 export interface MarketDataConfig {
@@ -70,11 +71,6 @@ function klineKey(rawCode: string, options: FetchKlineOptions): string {
   return [rawCode, options.period, options.start ?? '', options.end ?? '', String(options.count ?? ''), String(options.adjusted ?? false)].join('|')
 }
 
-/** Full-jitter exponential backoff: uniform in [0, baseMs * 2^attempt]. */
-function backoffMs(attempt: number, baseMs: number): number {
-  return Math.floor(Math.random() * baseMs * 2 ** attempt)
-}
-
 /** Cached, rate-limited access to realtime quotes and historical K-line. */
 export class MarketDataService {
   private readonly quoteCache: TtlCache<string, Quote>
@@ -92,47 +88,44 @@ export class MarketDataService {
   }
 
   /** Realtime quote for one Tencent code, cached and single-flight. */
-  quote(rawCode: string): Promise<Quote> {
+  quote(rawCode: string, signal?: AbortSignal): Promise<Quote> {
     const cached = this.quoteCache.get(rawCode)
     if (cached !== undefined) return Promise.resolve(cached)
     const inFlight = this.quoteInFlight.get(rawCode)
     if (inFlight !== undefined) return inFlight
-    const request = this.loadQuote(rawCode).finally(() => this.quoteInFlight.delete(rawCode))
+    const request = this.loadQuote(rawCode, signal).finally(() => this.quoteInFlight.delete(rawCode))
     this.quoteInFlight.set(rawCode, request)
     return request
   }
 
   /** Historical bars for one request, cached and single-flight. */
-  kline(rawCode: string, options: FetchKlineOptions): Promise<Bar[]> {
+  kline(rawCode: string, options: FetchKlineOptions, signal?: AbortSignal): Promise<Bar[]> {
     const key = klineKey(rawCode, options)
     const cached = this.klineCache.get(key)
     if (cached !== undefined) return Promise.resolve(cached)
     const inFlight = this.klineInFlight.get(key)
     if (inFlight !== undefined) return inFlight
-    const request = this.loadKline(rawCode, options, key).finally(() => this.klineInFlight.delete(key))
+    const request = this.loadKline(rawCode, options, key, signal).finally(() => this.klineInFlight.delete(key))
     this.klineInFlight.set(key, request)
     return request
   }
 
-  private async loadQuote(rawCode: string): Promise<Quote> {
-    return this.withRetry(async () => {
-      const quote = await fetchQuote(rawCode, this.config.requestTimeoutMs, () => this.acquireSlot())
-      this.quoteCache.set(rawCode, quote)
-      return quote
-    })
+  private async loadQuote(rawCode: string, signal?: AbortSignal): Promise<Quote> {
+    const quote = await fetchQuote(rawCode, this.transport(signal))
+    this.quoteCache.set(rawCode, quote)
+    return quote
   }
 
-  private async loadKline(rawCode: string, options: FetchKlineOptions, key: string): Promise<Bar[]> {
-    return this.withRetry(async () => {
-      const bars = await fetchKline(rawCode, options, this.config.requestTimeoutMs, () => this.acquireSlot())
-      this.klineCache.set(key, bars)
-      return bars
-    })
+  private async loadKline(rawCode: string, options: FetchKlineOptions, key: string, signal?: AbortSignal): Promise<Bar[]> {
+    const bars = await fetchKline(rawCode, options, this.transport(signal))
+    this.klineCache.set(key, bars)
+    return bars
   }
 
   /**
-   * Claim one request slot: first the time-based limiter (≥500ms spacing), then
-   * a concurrency slot (released when the fetch finishes).
+   * Claim one request slot: first the concurrency semaphore, then the time-based
+   * limiter (so the spacing is measured from the actual fetch start). Releasing
+   * hands the concurrency slot back.
    */
   private async acquireSlot(): Promise<() => void> {
     const releaseSemaphore = await this.semaphore.acquire()
@@ -145,20 +138,14 @@ export class MarketDataService {
     return releaseSemaphore
   }
 
-  /**
-   * Run one API operation with bounded retry on transient failures. Every
-   * underlying HTTP request claims a slot from the shared limiter inside the
-   * data layer (so pagination pages and retries never cut the line); backoff is
-   * full-jitter exponential and 4xx is never retried.
-   */
-  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await operation()
-      } catch (error) {
-        if (attempt >= this.config.maxRetries || !isTransientError(error)) throw error
-        await sleep(backoffMs(attempt, this.config.retryBaseMs))
-      }
+  /** Build the transport passed to every data-layer request. */
+  private transport(signal?: AbortSignal): Transport {
+    return {
+      requestTimeoutMs: this.config.requestTimeoutMs,
+      maxRetries: this.config.maxRetries,
+      retryBaseMs: this.config.retryBaseMs,
+      acquire: () => this.acquireSlot(),
+      signal,
     }
   }
 }

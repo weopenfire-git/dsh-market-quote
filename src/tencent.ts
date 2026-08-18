@@ -4,13 +4,19 @@
  * Tencent's `qt.gtimg.cn` returns realtime quotes for A-share / HK / US
  * markets on one endpoint with no API key and no Referer requirement, and
  * `web.ifzq.gtimg.cn/appstock/app/fqkline/get` returns historical daily/weekly/
- * monthly K-line. Both are the prototype's sole data source.
+ * monthly K-line. Both are the plugin's sole data source.
  *
  * Encoding is GBK, so the realtime body is decoded as bytes, never as a UTF-8
  * string. Field parsing reads only the stable core segment ([0]..[53] for
  * realtime) and stays tolerant of an unknown tail.
+ *
+ * Every HTTP request is retried individually (per request, not per operation)
+ * so a paginated query never re-fetches pages that already succeeded, and an
+ * external cancellation signal aborts without retrying.
  * @module dsh-market-quote/tencent
  */
+
+import { sleep } from './cache.ts'
 
 /** Symbol code rule for each market. */
 export type Market = 'cn' | 'hk' | 'us'
@@ -90,13 +96,52 @@ export function qqCode(code: string, market: Market): string {
 /** A slot-claiming gate every HTTP request passes through; resolves to the slot release. */
 export type Acquire = () => Promise<() => void>
 
-/** Claim the request gate, then fetch with a hard per-attempt timeout; releases the slot afterwards. */
-async function fetchWithTimeout(url: string, timeoutMs: number, acquire: Acquire): Promise<Response> {
-  const release = await acquire()
+/** Transport-level knobs and gates shared by every HTTP request. */
+export interface Transport {
+  /** Hard per-attempt fetch timeout (ms). */
+  requestTimeoutMs: number
+  /** Max retries per request on a transient (5xx / network) failure. */
+  maxRetries: number
+  /** Backoff base between retries (ms). */
+  retryBaseMs: number
+  /** Rate-limit + concurrency gate. */
+  acquire: Acquire
+  /** External cancellation signal (e.g. the owning tool call's abort). */
+  signal?: AbortSignal
+}
+
+/** Full-jitter exponential backoff: uniform in [0, baseMs * 2^attempt]. */
+function backoffMs(attempt: number, baseMs: number): number {
+  return Math.floor(Math.random() * baseMs * 2 ** attempt)
+}
+
+/**
+ * Run one HTTP request with bounded retry on transient failures. Retry is
+ * per-request, so a paginated query does not re-fetch pages that already
+ * succeeded. An external cancellation aborts without retrying.
+ */
+async function withRetry<T>(request: () => Promise<T>, transport: Transport): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    if (transport.signal?.aborted) throw new Error('dsh-market-quote: request aborted')
+    try {
+      return await request()
+    } catch (error) {
+      if (attempt >= transport.maxRetries || !isTransientError(error) || transport.signal?.aborted) throw error
+      await sleep(backoffMs(attempt, transport.retryBaseMs))
+    }
+  }
+}
+
+/** Claim the request gate, then fetch with a per-attempt timeout combined with any external cancellation. */
+async function fetchWithTimeout(url: string, transport: Transport): Promise<Response> {
+  const release = await transport.acquire()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const timer = setTimeout(() => controller.abort(), transport.requestTimeoutMs)
+  const signal = transport.signal !== undefined
+    ? AbortSignal.any([controller.signal, transport.signal])
+    : controller.signal
   try {
-    return await fetch(url, { redirect: 'error', signal: controller.signal })
+    return await fetch(url, { redirect: 'error', signal })
   } finally {
     clearTimeout(timer)
     release()
@@ -104,8 +149,8 @@ async function fetchWithTimeout(url: string, timeoutMs: number, acquire: Acquire
 }
 
 /** Latest quote for one symbol. */
-export async function fetchQuote(rawCode: string, requestTimeoutMs: number, acquire: Acquire): Promise<Quote> {
-  const quotes = await fetchQuotes([rawCode], requestTimeoutMs, acquire)
+export async function fetchQuote(rawCode: string, transport: Transport): Promise<Quote> {
+  const quotes = await fetchQuotes([rawCode], transport)
   const quote = quotes[0]
   if (quote === undefined) throw new Error(`tencent: no quote returned for ${rawCode}`)
   return quote
@@ -114,27 +159,28 @@ export async function fetchQuote(rawCode: string, requestTimeoutMs: number, acqu
 /**
  * Fetch realtime quotes for several symbols in one request.
  * @param rawCodes - Tencent codes (`sh600000`, `hk00700`, `usAAPL.OQ`, ...).
- * @param requestTimeoutMs - hard per-attempt fetch timeout in ms.
- * @param acquire - request gate to await before fetching.
+ * @param transport - timeout / retry / rate-limit / cancellation knobs.
  * @returns one entry per requested symbol, in request order. A symbol Tencent
  *   does not know is excluded rather than throwing, so a batch survives a bad member.
  */
-export async function fetchQuotes(rawCodes: readonly string[], requestTimeoutMs: number, acquire: Acquire): Promise<Quote[]> {
+export async function fetchQuotes(rawCodes: readonly string[], transport: Transport): Promise<Quote[]> {
   if (rawCodes.length === 0) return []
-  const url = 'https://qt.gtimg.cn/q=' + rawCodes.join(',')
-  const response = await fetchWithTimeout(url, requestTimeoutMs, acquire)
-  if (!response.ok) {
-    throw new HttpError(response.status, `tencent: quote request failed with HTTP ${response.status}`)
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  const text = decodeGbk(bytes)
-  const quotes: Quote[] = []
-  for (const line of text.split(';')) {
-    const match = /v_([\w.]+)="([^"]*)"/.exec(line)
-    if (match === null) continue
-    quotes.push(parseQuote(match[1] as string, match[2] as string))
-  }
-  return quotes
+  return withRetry(async () => {
+    const url = 'https://qt.gtimg.cn/q=' + rawCodes.join(',')
+    const response = await fetchWithTimeout(url, transport)
+    if (!response.ok) {
+      throw new HttpError(response.status, `tencent: quote request failed with HTTP ${response.status}`)
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const text = decodeGbk(bytes)
+    const quotes: Quote[] = []
+    for (const line of text.split(';')) {
+      const match = /v_([\w.]+)="([^"]*)"/.exec(line)
+      if (match === null) continue
+      quotes.push(parseQuote(match[1] as string, match[2] as string))
+    }
+    return quotes
+  }, transport)
 }
 
 /** Decode a GBK/GB18030 byte buffer to a string. */
@@ -193,7 +239,7 @@ const KLINE_PAGE_MAX = 640
 /** Hard cap on total bars one fetch returns, bounding memory for long ranges. */
 const KLINE_TOTAL_MAX = 2000
 
-/** One kline request, parsed into oldest-first bars. */
+/** One kline request, retried individually, parsed into oldest-first bars. */
 async function klineOnce(
   rawCode: string,
   period: 'day' | 'week' | 'month',
@@ -201,45 +247,46 @@ async function klineOnce(
   end: string,
   count: number,
   adjusted: boolean,
-  requestTimeoutMs: number,
-  acquire: Acquire,
+  transport: Transport,
 ): Promise<Bar[]> {
-  const fq = adjusted ? 'qfq' : ''
-  // param = <code>,<period>,<start>,<end>,<count>,<fq>
-  const param = [rawCode, period, start, end, String(count), fq].join(',')
-  const url = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + encodeURIComponent(param)
-  const response = await fetchWithTimeout(url, requestTimeoutMs, acquire)
-  if (!response.ok) {
-    throw new HttpError(response.status, `tencent: kline request failed with HTTP ${response.status}`)
-  }
-  const json = await response.json() as { code?: unknown; data?: Record<string, unknown> }
-  if (json.code !== 0) {
-    throw new Error(`tencent: kline request rejected (code=${String(json.code)})`)
-  }
-  const day = json.data?.[rawCode.replace('.', '_')] ?? json.data?.[rawCode]
-  // The kline key follows the adjustment request for CN: qfqday/hfqday/day.
-  const rows = (day as Record<string, unknown> | undefined)?.[`${fq || ''}${period}`] as unknown
-  if (!Array.isArray(rows)) {
-    throw new Error(`tencent: kline response for ${rawCode} has no ${period} array`)
-  }
-  const bars: Bar[] = []
-  for (const row of rows) {
-    if (!Array.isArray(row)) continue
-    const [date, open, close, high, low, volume] = row as [string, string, string, string, string, string]
-    if (typeof date !== 'string') continue
-    bars.push({
-      date,
-      open: Number(open),
-      close: Number(close),
-      high: Number(high),
-      low: Number(low),
-      volume: Number(volume),
-    })
-  }
-  // Tencent returns newest-first for recent queries; normalize to oldest-first
-  // so the tool's documented order and page-cursor logic do not depend on it.
-  bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
-  return bars
+  return withRetry(async () => {
+    const fq = adjusted ? 'qfq' : ''
+    // param = <code>,<period>,<start>,<end>,<count>,<fq>
+    const param = [rawCode, period, start, end, String(count), fq].join(',')
+    const url = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + encodeURIComponent(param)
+    const response = await fetchWithTimeout(url, transport)
+    if (!response.ok) {
+      throw new HttpError(response.status, `tencent: kline request failed with HTTP ${response.status}`)
+    }
+    const json = await response.json() as { code?: unknown; data?: Record<string, unknown> }
+    if (json.code !== 0) {
+      throw new Error(`tencent: kline request rejected (code=${String(json.code)})`)
+    }
+    const day = json.data?.[rawCode.replace('.', '_')] ?? json.data?.[rawCode]
+    // The kline key follows the adjustment request for CN: qfqday/hfqday/day.
+    const rows = (day as Record<string, unknown> | undefined)?.[`${fq || ''}${period}`] as unknown
+    if (!Array.isArray(rows)) {
+      throw new Error(`tencent: kline response for ${rawCode} has no ${period} array`)
+    }
+    const bars: Bar[] = []
+    for (const row of rows) {
+      if (!Array.isArray(row)) continue
+      const [date, open, close, high, low, volume] = row as [string, string, string, string, string, string]
+      if (typeof date !== 'string') continue
+      bars.push({
+        date,
+        open: Number(open),
+        close: Number(close),
+        high: Number(high),
+        low: Number(low),
+        volume: Number(volume),
+      })
+    }
+    // Tencent returns newest-first for recent queries; normalize to oldest-first
+    // so the tool's documented order and page-cursor logic do not depend on it.
+    bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    return bars
+  }, transport)
 }
 
 /** Options for {@link fetchKline}. */
@@ -260,25 +307,26 @@ export interface FetchKlineOptions {
  * Fetch historical K-line bars, oldest-first.
  *
  * Without `start`/`end` this returns the `count` most-recent bars (≤640). With
- * a range it returns bars inside `[start, end]`, paginating `day` requests past
- * the API's 640-bar page cap; `week`/`month` never paginate (640 bars is ~12/~53
- * years). Total returned bars are capped at 2000.
+ * a range it returns bars inside `[start, end]`. Tencent returns the NEWEST
+ * `count` bars in a queried range, so `day` paginates backward (each page's
+ * oldest bar minus one day becomes the next page's end) and reverses to
+ * oldest-first; `week`/`month` never paginate (640 bars is ~12/~53 years).
+ * Total returned bars are capped at 2000.
  *
  * @param rawCode - Tencent code. For a US symbol this MUST carry the exchange
  *   suffix (e.g. `usAAPL.OQ`); use {@link fetchQuote} to resolve it first.
  * @param options - see {@link FetchKlineOptions}.
- * @param requestTimeoutMs - hard per-attempt fetch timeout in ms.
- * @param acquire - request gate to await before each paginated fetch.
+ * @param transport - timeout / retry / rate-limit / cancellation knobs.
  * @returns bars oldest-first.
  */
-export async function fetchKline(rawCode: string, options: FetchKlineOptions, requestTimeoutMs: number, acquire: Acquire): Promise<Bar[]> {
+export async function fetchKline(rawCode: string, options: FetchKlineOptions, transport: Transport): Promise<Bar[]> {
   const { period } = options
   const adjusted = options.adjusted ?? false
 
   // Recent path: no range, single request.
   if (options.start === undefined && options.end === undefined) {
     const n = Math.max(1, Math.min(KLINE_PAGE_MAX, Math.floor(options.count ?? 30)))
-    return klineOnce(rawCode, period, '', '', n, adjusted, requestTimeoutMs, acquire)
+    return klineOnce(rawCode, period, '', '', n, adjusted, transport)
   }
 
   // Range path: resolve concrete [start, end].
@@ -293,7 +341,7 @@ export async function fetchKline(rawCode: string, options: FetchKlineOptions, re
 
   // week/month spans never need paging (640 covers 12/53 years).
   if (period !== 'day') {
-    return (await klineOnce(rawCode, period, start, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)).slice(-cap)
+    return (await klineOnce(rawCode, period, start, end, KLINE_PAGE_MAX, adjusted, transport)).slice(-cap)
   }
 
   // day: Tencent returns the NEWEST `count` bars in a queried range, so page
@@ -302,7 +350,7 @@ export async function fetchKline(rawCode: string, options: FetchKlineOptions, re
   const pages: Bar[][] = []
   let pageEnd = end
   while (true) {
-    const page = await klineOnce(rawCode, 'day', start, pageEnd, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)
+    const page = await klineOnce(rawCode, 'day', start, pageEnd, KLINE_PAGE_MAX, adjusted, transport)
     if (page.length === 0) break
     pages.push(page)
     const total = pages.reduce((sum, p) => sum + p.length, 0)

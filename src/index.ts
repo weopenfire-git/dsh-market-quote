@@ -141,9 +141,9 @@ export function apply(ctx: Context, config?: Config): void {
     },
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const rawCode = qqCode(args.symbol, args.market)
-      const q = await service.quote(rawCode)
+      const q = await service.quote(rawCode, exec.signal)
       return {
         symbol: q.code,
         name: q.name,
@@ -264,14 +264,14 @@ export function apply(ctx: Context, config?: Config): void {
       // US history requires the exchange suffix (e.g. AAPL.OQ); resolve it from
       // the live quote, which returns the canonical market-qualified code.
       const rawCode = market === 'us'
-        ? 'us' + ((await service.quote(baseRaw)).code)
+        ? 'us' + ((await service.quote(baseRaw, exec.signal)).code)
         : baseRaw
       const options: FetchKlineOptions = { period }
       if (args.start !== undefined) options.start = args.start
       if (args.end !== undefined) options.end = args.end
       if (args.count !== undefined) options.count = args.count
       const startedAt = Date.now()
-      const bars = await service.kline(rawCode, options)
+      const bars = await service.kline(rawCode, options, exec.signal)
       return {
         symbol: args.symbol,
         market,

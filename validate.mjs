@@ -40,6 +40,7 @@ const { qqCode, fetchQuotes, fetchKline } = tencent
 const { TtlCache, RateLimiter } = cache
 const { MarketDataService, resolveMarketDataConfig } = service
 const noopAcquire = () => Promise.resolve(() => {})
+const testTransport = { requestTimeoutMs: 5000, maxRetries: 0, retryBaseMs: 1, acquire: noopAcquire }
 
 let failures = 0
 function check(label, actual, expected) {
@@ -66,7 +67,7 @@ globalThis.fetch = async () => ({
   status: 200,
   arrayBuffer: async () => iconv.encode(realtimeBody, 'gbk').buffer,
 })
-const [quote] = await fetchQuotes(['sh600000'], 5000, noopAcquire)
+const [quote] = await fetchQuotes(['sh600000'], testTransport)
 check('realtime code', quote.code, '600000')
 check('realtime price', quote.price, 9.1)
 check('realtime change', quote.change, -0.08)
@@ -83,7 +84,7 @@ globalThis.fetch = async (url) => {
   capturedUrl = String(url)
   return { ok: true, status: 200, json: async () => klineBody }
 }
-const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, 5000, noopAcquire)
+const bars = await fetchKline('sh600000', { period: 'day', count: 30, adjusted: true }, testTransport)
 check('kline url carries qfq+count', decodeURIComponent(capturedUrl), 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600000,day,,,30,qfq')
 check('kline bar count', bars.length, 2)
 check('kline last bar', bars[1], { date: '2026-08-14', open: 9.14, close: 9.1, high: 9.17, low: 9.06, volume: 436231 })
@@ -93,7 +94,7 @@ globalThis.fetch = async (url) => {
   capturedUrl = String(url)
   return { ok: true, status: 200, json: async () => ({ code: 0, data: { sh600000: { day: [] } } }) }
 }
-await fetchKline('sh600000', { period: 'day', count: 5000 }, 5000, noopAcquire)
+await fetchKline('sh600000', { period: 'day', count: 5000 }, testTransport)
 check('kline count capped to 640', decodeURIComponent(capturedUrl).includes('sh600000,day,,,640,'), true)
 
 // 5. Date range passes start/end and sorts oldest-first.
@@ -104,7 +105,7 @@ globalThis.fetch = async (url) => {
     ['2025-06-02', '9.10', '9.15', '9.18', '9.05', '350000'],
   ] } } }) }
 }
-const ranged = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, 5000, noopAcquire)
+const ranged = await fetchKline('sh600000', { period: 'day', start: '2025-06-01', end: '2025-06-30' }, testTransport)
 check('range url carries start+end', decodeURIComponent(capturedUrl), 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600000,day,2025-06-01,2025-06-30,640,')
 check('range bars sorted oldest-first', ranged.map(b => b.date), ['2025-06-02', '2025-06-03'])
 

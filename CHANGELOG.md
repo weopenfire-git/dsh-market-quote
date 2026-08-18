@@ -4,6 +4,17 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-08-17
+
+### Changed
+
+- 重试下沉到数据层、改为「单次 HTTP 请求」粒度：分页查询中某一页失败只重试该页，不再重跑整个分页（避免请求数被重试放大）。
+- 引入 `Transport` 打包（`requestTimeoutMs` / `maxRetries` / `retryBaseMs` / `acquire` / `signal`），统一每个请求的传输参数。
+
+### Added
+
+- 接入工具调用的取消信号（`exec.signal`）：取消 / 超时会真正中断 in-flight 请求（`AbortSignal.any` 组合每尝试超时信号），且已取消的请求不再重试。
+
 ## [0.4.1] - 2026-08-17
 
 ### Fixed
