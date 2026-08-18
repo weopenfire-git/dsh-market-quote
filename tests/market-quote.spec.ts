@@ -53,6 +53,16 @@ describe('tencent realtime parsing', () => {
     expect(q.change).toBeCloseTo(-0.08, 2)
     expect(q.changePct).toBeCloseTo(-0.87, 2)
   })
+
+  it('parses a dotted US code (e.g. BRK.B)', async () => {
+    const body = 'v_usBRK.B="1~Berkshire Hathaway~BRK.B~400.00~398.00~399.00~1234~";'
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(body).buffer,
+    })))
+    const quotes = await fetchQuotes(['usBRK.B'], 5000, noopAcquire)
+    expect(quotes[0]?.code).toBe('BRK.B')
+    expect(quotes[0]?.name).toBe('Berkshire Hathaway')
+  })
 })
 
 describe('kline request', () => {
@@ -106,12 +116,16 @@ describe('kline request', () => {
     expect(bars.map(b => b.date)).toEqual(['2025-06-02', '2025-06-03'])
   })
 
-  it('acquires the rate-limit gate once per paginated request', async () => {
-    const genBars = (n: number): string[][] => Array.from({ length: n }, (_, i) => {
-      const date = new Date(Date.UTC(2023, 0, 1) + i * 86_400_000).toISOString().slice(0, 10)
-      return [date, '9.00', '9.10', '9.20', '8.90', '1000']
-    })
-    const pages = [genBars(640), genBars(10)]
+  it('acquires the rate-limit gate once per paginated request (backward paging)', async () => {
+    const genBarsEndingAt = (n: number, endIso: string): string[][] => {
+      const endMs = Date.parse(endIso)
+      return Array.from({ length: n }, (_, i) => {
+        const date = new Date(endMs - (n - 1 - i) * 86_400_000).toISOString().slice(0, 10)
+        return [date, '9.00', '9.10', '9.20', '8.90', '1000']
+      })
+    }
+    // Tencent returns the newest bars first: 640 ending at the range end, then a shorter older page.
+    const pages = [genBarsEndingAt(640, '2025-12-31'), genBarsEndingAt(10, '2024-01-01')]
     const fetchMock = vi.fn(async () => ({
       ok: true, status: 200,
       json: async () => ({ code: 0, data: { sh600000: { day: pages.shift() } } }),
@@ -121,7 +135,9 @@ describe('kline request', () => {
     const bars = await fetchKline('sh600000', { period: 'day', start: '2023-01-01', end: '2025-12-31', count: 2000 }, 5000, acquire)
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(acquire).toHaveBeenCalledTimes(2)
-    expect(bars).toHaveLength(640)
+    expect(bars).toHaveLength(650)
+    expect(bars[0]?.date).toBe('2023-12-23') // oldest (older page, after reversal)
+    expect(bars.at(-1)?.date).toBe('2025-12-31') // newest (newest page)
   })
 })
 

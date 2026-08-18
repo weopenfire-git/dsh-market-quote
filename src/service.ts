@@ -135,8 +135,14 @@ export class MarketDataService {
    * a concurrency slot (released when the fetch finishes).
    */
   private async acquireSlot(): Promise<() => void> {
-    await this.limiter.acquire()
-    return this.semaphore.acquire()
+    const releaseSemaphore = await this.semaphore.acquire()
+    try {
+      await this.limiter.acquire()
+    } catch (error) {
+      releaseSemaphore()
+      throw error
+    }
+    return releaseSemaphore
   }
 
   /**

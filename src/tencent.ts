@@ -130,7 +130,7 @@ export async function fetchQuotes(rawCodes: readonly string[], requestTimeoutMs:
   const text = decodeGbk(bytes)
   const quotes: Quote[] = []
   for (const line of text.split(';')) {
-    const match = /v_(\w+)="([^"]*)"/.exec(line)
+    const match = /v_([\w.]+)="([^"]*)"/.exec(line)
     if (match === null) continue
     quotes.push(parseQuote(match[1] as string, match[2] as string))
   }
@@ -296,25 +296,32 @@ export async function fetchKline(rawCode: string, options: FetchKlineOptions, re
     return (await klineOnce(rawCode, period, start, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)).slice(-cap)
   }
 
-  // day: page forward from `start`, deduping and advancing past each page's
-  // last date until a short page or the cap is reached.
+  // day: Tencent returns the NEWEST `count` bars in a queried range, so page
+  // backward — each page's oldest bar becomes the next page's end — then reverse
+  // to oldest-first, deduping and capping.
+  const pages: Bar[][] = []
+  let pageEnd = end
+  while (true) {
+    const page = await klineOnce(rawCode, 'day', start, pageEnd, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)
+    if (page.length === 0) break
+    pages.push(page)
+    const total = pages.reduce((sum, p) => sum + p.length, 0)
+    if (total >= cap || page.length < KLINE_PAGE_MAX) break
+    const oldest = page[0]
+    if (oldest === undefined) break
+    const nextEnd = shiftDate(oldest.date, -1)
+    if (nextEnd >= pageEnd || nextEnd < start) break // safety: strictly move backward, stay in range
+    pageEnd = nextEnd
+  }
   const out: Bar[] = []
   const seen = new Set<string>()
-  let cursor = start
-  while (cursor <= end && out.length < cap) {
-    const page = await klineOnce(rawCode, 'day', cursor, end, KLINE_PAGE_MAX, adjusted, requestTimeoutMs, acquire)
+  for (const page of pages.reverse()) {
     for (const bar of page) {
       if (out.length >= cap) break
       if (seen.has(bar.date)) continue
       seen.add(bar.date)
       out.push(bar)
     }
-    if (page.length < KLINE_PAGE_MAX) break
-    const last = page[page.length - 1]
-    if (last === undefined) break
-    const next = shiftDate(last.date, 1)
-    if (next <= cursor) break // safety: cursor must strictly advance
-    cursor = next
   }
   return out
 }
