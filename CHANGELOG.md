@@ -4,6 +4,20 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-08-17
+
+### Fixed
+
+- 网络错误归一化：`fetchWithTimeout` 把网络失败包成 `NetworkError`，`isTransientError` 不再把一切 `TypeError`（含代码 bug）当瞬时重试。
+- 实时行情 `high`/`low` 回退只在主字段为空时生效（`priceField`），修复停牌股 `high=0` 被误回退到别的字段。
+- `week`/`month` 区间同样改为向后翻页，修复 >12/53 年区间静默只返回最新 640 根的截断。
+- `end` 缺省改为交易所本地「今天」（CN/HK 精确 UTC+8；US 近似 UTC-5、忽略 DST）。
+
+### Added
+
+- `cacheMaxSize`（默认 1000）缓存条目上限、最旧淘汰，防长进程内存无界增长。
+- 美股历史在解析不到交易所后缀时 fail-loud（清晰报错），替代此前的含糊下游错误。
+
 ## [0.5.0] - 2026-08-17
 
 ### Changed

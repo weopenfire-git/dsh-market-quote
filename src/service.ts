@@ -29,6 +29,8 @@ export interface MarketDataConfig {
   requestTimeoutMs?: number
   /** Max concurrent in-flight HTTP requests. */
   maxConcurrency?: number
+  /** Max entries held per cache before oldest-first eviction. */
+  cacheMaxSize?: number
 }
 
 /** Default quote cache lifetime (5 s): quotes move, but not every keystroke. */
@@ -45,6 +47,8 @@ export const DEFAULT_RETRY_BASE_MS = 1_000
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5_000
 /** Default max concurrent in-flight requests. */
 export const DEFAULT_MAX_CONCURRENCY = 3
+/** Default cache size cap per cache (bounds memory for long-lived processes). */
+export const DEFAULT_CACHE_MAX_SIZE = 1000
 
 /** Validate and default the raw config; fails loud on a non-positive-integer field. */
 export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Required<MarketDataConfig> {
@@ -56,6 +60,7 @@ export function resolveMarketDataConfig(config?: Partial<MarketDataConfig>): Req
     retryBaseMs: config?.retryBaseMs ?? DEFAULT_RETRY_BASE_MS,
     requestTimeoutMs: config?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
     maxConcurrency: config?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+    cacheMaxSize: config?.cacheMaxSize ?? DEFAULT_CACHE_MAX_SIZE,
   }
   for (const [key, value] of Object.entries(resolved)) {
     const min = key === 'maxRetries' ? 0 : 1
@@ -81,8 +86,8 @@ export class MarketDataService {
   private readonly klineInFlight = new Map<string, Promise<Bar[]>>()
 
   constructor(public readonly config: Required<MarketDataConfig>) {
-    this.quoteCache = new TtlCache(config.quoteTtlMs)
-    this.klineCache = new TtlCache(config.klineTtlMs)
+    this.quoteCache = new TtlCache(config.quoteTtlMs, Date.now, config.cacheMaxSize)
+    this.klineCache = new TtlCache(config.klineTtlMs, Date.now, config.cacheMaxSize)
     this.limiter = new RateLimiter(config.minRequestIntervalMs)
     this.semaphore = new Semaphore(config.maxConcurrency)
   }

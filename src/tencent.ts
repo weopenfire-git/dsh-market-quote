@@ -72,11 +72,20 @@ export class HttpError extends Error {
   }
 }
 
+/** A network-level failure (fetch rejected), always transient. */
+export class NetworkError extends Error {
+  constructor(cause: unknown) {
+    super('tencent: network failure', { cause })
+    this.name = 'NetworkError'
+  }
+}
+
 /** True when the error is a transient upstream/network failure worth retrying. */
 export function isTransientError(error: unknown): boolean {
   if (error instanceof HttpError) return error.status >= 500 && error.status < 600
-  // A network failure rejects fetch with a TypeError; a timeout aborts with AbortError.
-  if (error instanceof TypeError) return true
+  // A genuine network failure is normalized to NetworkError by fetchWithTimeout;
+  // a timeout aborts with AbortError. Other errors (code bugs, parse errors) are not transient.
+  if (error instanceof NetworkError) return true
   return (error as { name?: string })?.name === 'AbortError'
 }
 
@@ -142,6 +151,11 @@ async function fetchWithTimeout(url: string, transport: Transport): Promise<Resp
     : controller.signal
   try {
     return await fetch(url, { redirect: 'error', signal })
+  } catch (error) {
+    // Normalize a genuine network failure (fetch rejects with TypeError) so it
+    // is retried; a timeout/external abort stays an AbortError.
+    if ((error as { name?: string })?.name !== 'AbortError') throw new NetworkError(error)
+    throw error
   } finally {
     clearTimeout(timer)
     release()
@@ -196,6 +210,12 @@ function parseQuote(rawCode: string, body: string): Quote {
     const value = Number(f[index])
     return Number.isFinite(value) ? value : 0
   }
+  // Read a price field, falling back to `fallbackIndex` only when the primary is empty/invalid.
+  const priceField = (index: number, fallbackIndex: number): number => {
+    const raw = f[index]
+    const value = raw !== undefined && raw !== '' ? Number(raw) : Number.NaN
+    return Number.isFinite(value) ? value : num(fallbackIndex)
+  }
   const marketFlag = f[0] ?? ''
   const price = num(3)
   const prevClose = num(4)
@@ -207,8 +227,8 @@ function parseQuote(rawCode: string, body: string): Quote {
     prevClose,
     open: num(5),
     volume: num(6),
-    high: num(33) || num(41),
-    low: num(34) || num(42),
+    high: priceField(33, 41),
+    low: priceField(34, 42),
     change: num(31),
     changePct: num(32),
     time: f[30] ?? '',
@@ -228,9 +248,15 @@ function shiftDate(date: string, deltaDays: number): string {
   return toIsoDate(Date.UTC(y, m - 1, d) + deltaDays * 86_400_000)
 }
 
-/** Today's date as YYYY-MM-DD (UTC). */
-function todayUtc(): string {
-  return toIsoDate(Date.now())
+/** Approximate UTC offset (hours) of the exchange a code belongs to. */
+function exchangeOffsetHours(rawCode: string): number {
+  // US Eastern (DST ignored — close enough for date boundaries); A-share + HK are UTC+8.
+  return rawCode.startsWith('us') ? -5 : 8
+}
+
+/** The exchange-local date for a code, as YYYY-MM-DD. */
+function exchangeToday(rawCode: string): string {
+  return toIsoDate(Date.now() + exchangeOffsetHours(rawCode) * 3_600_000)
 }
 
 /** Tencent caps one kline request at this many bars. */
@@ -308,10 +334,9 @@ export interface FetchKlineOptions {
  *
  * Without `start`/`end` this returns the `count` most-recent bars (≤640). With
  * a range it returns bars inside `[start, end]`. Tencent returns the NEWEST
- * `count` bars in a queried range, so `day` paginates backward (each page's
- * oldest bar minus one day becomes the next page's end) and reverses to
- * oldest-first; `week`/`month` never paginate (640 bars is ~12/~53 years).
- * Total returned bars are capped at 2000.
+ * `count` bars in a queried range for every period, so ranges paginate backward
+ * (each page's oldest bar minus one day becomes the next page's end) and then
+ * reverse to oldest-first. Total returned bars are capped at 2000.
  *
  * @param rawCode - Tencent code. For a US symbol this MUST carry the exchange
  *   suffix (e.g. `usAAPL.OQ`); use {@link fetchQuote} to resolve it first.
@@ -333,24 +358,19 @@ export async function fetchKline(rawCode: string, options: FetchKlineOptions, tr
   const cap = Math.max(1, Math.min(KLINE_TOTAL_MAX, Math.floor(options.count ?? KLINE_PAGE_MAX)))
   let start = options.start
   let end = options.end
-  if (end === undefined) end = todayUtc()
+  if (end === undefined) end = exchangeToday(rawCode)
   if (start === undefined) {
     // end-only: back up ~2 calendar days per bar to cover weekends/holidays.
     start = shiftDate(end, -(cap * 2))
   }
 
-  // week/month spans never need paging (640 covers 12/53 years).
-  if (period !== 'day') {
-    return (await klineOnce(rawCode, period, start, end, KLINE_PAGE_MAX, adjusted, transport)).slice(-cap)
-  }
-
-  // day: Tencent returns the NEWEST `count` bars in a queried range, so page
-  // backward — each page's oldest bar becomes the next page's end — then reverse
-  // to oldest-first, deduping and capping.
+  // Tencent returns the NEWEST `count` bars in a queried range for every period,
+  // so page backward — each page's oldest bar becomes the next page's end — then
+  // reverse to oldest-first, deduping and capping.
   const pages: Bar[][] = []
   let pageEnd = end
   while (true) {
-    const page = await klineOnce(rawCode, 'day', start, pageEnd, KLINE_PAGE_MAX, adjusted, transport)
+    const page = await klineOnce(rawCode, period, start, pageEnd, KLINE_PAGE_MAX, adjusted, transport)
     if (page.length === 0) break
     pages.push(page)
     const total = pages.reduce((sum, p) => sum + p.length, 0)

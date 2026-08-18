@@ -18,10 +18,11 @@ export function sleep(ms: number): Promise<void> {
 export class TtlCache<K, V> {
   private readonly entries = new Map<K, { at: number; value: V }>()
 
-  /** @param ttlMs - entry lifetime in milliseconds. @param now - clock, defaults to `Date.now`. */
+  /** @param ttlMs - entry lifetime in milliseconds. @param now - clock, defaults to `Date.now`. @param maxSize - max entries before oldest-first eviction. */
   constructor(
     private readonly ttlMs: number,
     private readonly now: () => number = Date.now,
+    private readonly maxSize: number = Number.POSITIVE_INFINITY,
   ) {}
 
   /** The live value, or `undefined` when absent or expired (expired entries are dropped). */
@@ -35,9 +36,18 @@ export class TtlCache<K, V> {
     return entry.value
   }
 
-  /** Store a value, stamping it with the current time. */
+  /** Store a value, stamping it with the current time. Evicts the oldest entry when over the size cap. */
   set(key: K, value: V): void {
+    if (this.entries.size >= this.maxSize && !this.entries.has(key)) {
+      this.evictOldest()
+    }
     this.entries.set(key, { at: this.now(), value })
+  }
+
+  /** Drop the oldest-inserted entry (Map preserves insertion order). */
+  private evictOldest(): void {
+    const oldest = this.entries.keys().next().value
+    if (oldest !== undefined) this.entries.delete(oldest)
   }
 
   /** Number of entries currently held (including not-yet-evicted expired ones). */

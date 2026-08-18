@@ -57,7 +57,7 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 
 ## 配置
 
-七个 tunable（`maxRetries` 为次数、非负；`maxConcurrency` 为正整数；其余为毫秒、正整数），经插件 `config` 覆盖：
+八个 tunable（`maxRetries` 为次数、非负；`maxConcurrency`、`cacheMaxSize` 为正整数；其余为毫秒、正整数），经插件 `config` 覆盖：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -68,8 +68,9 @@ dsh plugin add github:weopenfire-git/dsh-market-quote  # GitHub
 | `retryBaseMs` | 1000 | 退避基数（1s → 2s → 4s，全抖动） |
 | `requestTimeoutMs` | 5000 | 单次尝试的 fetch 超时 |
 | `maxConcurrency` | 3 | 并发在途请求上限 |
+| `cacheMaxSize` | 1000 | 缓存条目上限（最旧淘汰） |
 
-非法值（`maxRetries` 为负、`maxConcurrency` 非正、其余非正整数）在插件激活时抛错。
+非法值（`maxRetries` 为负、`maxConcurrency`/`cacheMaxSize` 非正、其余非正整数）在插件激活时抛错。注意：`requestTimeoutMs` 应小于工具 `timeoutMs`（30s），否则工具超时会先触发。
 
 ## 使用建议（推荐区间与点数）
 

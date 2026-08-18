@@ -263,9 +263,14 @@ export function apply(ctx: Context, config?: Config): void {
       const baseRaw = qqCode(args.symbol, market)
       // US history requires the exchange suffix (e.g. AAPL.OQ); resolve it from
       // the live quote, which returns the canonical market-qualified code.
-      const rawCode = market === 'us'
-        ? 'us' + ((await service.quote(baseRaw, exec.signal)).code)
-        : baseRaw
+      let rawCode = baseRaw
+      if (market === 'us') {
+        const code = (await service.quote(baseRaw, exec.signal)).code
+        if (!code.includes('.')) {
+          throw new Error(`dsh-market-quote: could not resolve US exchange suffix for ${args.symbol} (quote code "${code}")`)
+        }
+        rawCode = 'us' + code
+      }
       const options: FetchKlineOptions = { period }
       if (args.start !== undefined) options.start = args.start
       if (args.end !== undefined) options.end = args.end

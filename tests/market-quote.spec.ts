@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { qqCode, fetchQuotes, fetchKline, fetchQuote, type Quote, type Transport } from '../src/tencent.ts'
+import { qqCode, fetchQuotes, fetchKline, fetchQuote, HttpError, NetworkError, isTransientError, type Quote, type Transport } from '../src/tencent.ts'
 import { apply } from '../src/index.ts'
 import { RateLimiter, Semaphore, TtlCache } from '../src/cache.ts'
 import { MarketDataService, resolveMarketDataConfig } from '../src/service.ts'
@@ -38,6 +38,17 @@ describe('qqCode symbol mapping', () => {
   it('maps Hong Kong and US symbols with prefixes', () => {
     expect(qqCode('00700', 'hk')).toBe('hk00700')
     expect(qqCode('AAPL', 'us')).toBe('usAAPL')
+  })
+})
+
+describe('error classification', () => {
+  it('classifies 5xx, network, and abort as transient; 4xx and code TypeErrors as not', () => {
+    expect(isTransientError(new HttpError(502, 'x'))).toBe(true)
+    expect(isTransientError(new NetworkError('x'))).toBe(true)
+    expect(isTransientError(Object.assign(new Error('x'), { name: 'AbortError' }))).toBe(true)
+    expect(isTransientError(new HttpError(429, 'x'))).toBe(false)
+    expect(isTransientError(new TypeError('code bug'))).toBe(false)
+    expect(isTransientError(new Error('parse error'))).toBe(false)
   })
 })
 
@@ -143,6 +154,25 @@ describe('kline request', () => {
     expect(bars[0]?.date).toBe('2023-12-23') // oldest (older page, after reversal)
     expect(bars.at(-1)?.date).toBe('2025-12-31') // newest (newest page)
   })
+
+  it('pages backward for week ranges too', async () => {
+    const genBarsEndingAt = (n: number, endIso: string): string[][] => {
+      const endMs = Date.parse(endIso)
+      return Array.from({ length: n }, (_, i) => {
+        const date = new Date(endMs - (n - 1 - i) * 86_400_000).toISOString().slice(0, 10)
+        return [date, '9.00', '9.10', '9.20', '8.90', '1000']
+      })
+    }
+    const pages = [genBarsEndingAt(640, '2025-12-31'), genBarsEndingAt(10, '2013-12-31')]
+    const fetchMock = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ code: 0, data: { sh600000: { week: pages.shift() } } }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const bars = await fetchKline('sh600000', { period: 'week', start: '2010-01-01', end: '2025-12-31', count: 2000 }, testTransport())
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(bars).toHaveLength(650)
+  })
 })
 
 describe('per-request retry & cancellation', () => {
@@ -187,6 +217,16 @@ describe('TtlCache', () => {
     expect(cache.get('a')).toBe(42)
     now = 1000
     expect(cache.get('a')).toBeUndefined()
+  })
+
+  it('evicts the oldest entry when over the size cap', () => {
+    const cache = new TtlCache<string, number>(1000, () => 0, 2)
+    cache.set('a', 1)
+    cache.set('b', 2)
+    cache.set('c', 3) // over cap: evicts 'a'
+    expect(cache.get('a')).toBeUndefined()
+    expect(cache.get('b')).toBe(2)
+    expect(cache.get('c')).toBe(3)
   })
 })
 
@@ -240,6 +280,11 @@ describe('MarketDataService', () => {
   it('defaults maxConcurrency and rejects a non-positive value', () => {
     expect(resolveMarketDataConfig().maxConcurrency).toBe(3)
     expect(() => resolveMarketDataConfig({ maxConcurrency: 0 })).toThrow(/integer >= 1/)
+  })
+
+  it('defaults cacheMaxSize and rejects a non-positive value', () => {
+    expect(resolveMarketDataConfig().cacheMaxSize).toBe(1000)
+    expect(() => resolveMarketDataConfig({ cacheMaxSize: 0 })).toThrow(/integer >= 1/)
   })
 
   it('allows maxRetries 0 (disable) but rejects negative', () => {

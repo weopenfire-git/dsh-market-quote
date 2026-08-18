@@ -57,7 +57,7 @@ Start a new session with that preset to expose the two tools.
 
 ## Configuration
 
-Seven tunables (`maxRetries` is a non-negative count; `maxConcurrency` a positive integer; the rest are positive-integer milliseconds), overridable via plugin `config`:
+Eight tunables (`maxRetries` is a non-negative count; `maxConcurrency` and `cacheMaxSize` positive integers; the rest are positive-integer milliseconds), overridable via plugin `config`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -68,8 +68,9 @@ Seven tunables (`maxRetries` is a non-negative count; `maxConcurrency` a positiv
 | `retryBaseMs` | 1000 | backoff base (1s → 2s → 4s, full jitter) |
 | `requestTimeoutMs` | 5000 | per-attempt fetch timeout |
 | `maxConcurrency` | 3 | max concurrent in-flight requests |
+| `cacheMaxSize` | 1000 | max cache entries (oldest evicted) |
 
-Invalid values (negative `maxRetries`, non-positive `maxConcurrency` or others) throw at plugin activation.
+Invalid values (negative `maxRetries`, non-positive `maxConcurrency`/`cacheMaxSize` or others) throw at plugin activation. Note: keep `requestTimeoutMs` below the tool `timeoutMs` (30s), otherwise the tool timeout fires first.
 
 ## Usage recommendations (ranges & counts)
 
